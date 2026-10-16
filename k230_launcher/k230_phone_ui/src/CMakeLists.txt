@@ -188,6 +188,7 @@ set(K230_PHONE_UI_SOURCES
     ui_mic_spectrum.c
     ui_usb_storage.c
     ui_meshtastic.c
+    ui_meshtasticd.c
     ui_xiaozhi.c
     ui_picoclaw.c
     ui_qr_scanner.c
@@ -232,6 +233,7 @@ add_executable(k230_qr_scan
     ${QUIRC_DIR}/version_db.c
 )
 add_executable(k230_pcm_volume pcm_volume.c)
+add_executable(k230_meshtastic_ble_bridge k230_meshtastic_ble_bridge.cpp)
 add_executable(k230_nrf52840_dfu k230_nrf52840_dfu.cpp)
 add_executable(k230_xiaozhi_probe k230_xiaozhi_probe.c)
 add_executable(k230_map_tile_downloader k230_map_tile_downloader.c)
@@ -573,6 +575,7 @@ set(K230_PHONE_UI_INSTALL_TARGETS
     k230_camera_capture
     k230_lorawan_test
     k230_meshtastic_probe
+    k230_meshtastic_ble_bridge
     k230_qr_scan
     k230_pcm_volume
     k230_nrf52840_dfu
