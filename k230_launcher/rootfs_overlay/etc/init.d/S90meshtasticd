@@ -1,0 +1,136 @@
+#!/bin/sh
+#
+# meshtasticd (Meshtastic firmware, Linux native) and the bridge that serves
+# it to the phone app over the nRF52840's Meshtastic BLE service.
+#
+# Does nothing unless /usr/bin/meshtasticd is installed. With it installed, the
+# launcher's Meshtastic app becomes a start/stop page for this service.
+#
+# Settings (launcher settings.conf):
+#   meshtasticd.autostart=0  don't start at boot (default 1)
+#   ble.enabled=0            no phone bridge (Settings > Bluetooth off)
+#   ble.mode=custom          no phone bridge (the UART is used for BLE scanning)
+#
+# Logs: /tmp/k230_meshtasticd.log, /tmp/k230_meshtastic_ble_bridge.log
+# Bridge state and pairing PIN: /tmp/k230_meshtastic_ble_status
+
+DAEMON=/usr/bin/meshtasticd
+CONFIG=/etc/meshtasticd/config.yaml
+# Prefs, keys and node DB. Explicit because init runs with HOME=/, which
+# would put them in /.portduino and boot a blank node.
+FSDIR=/root/.portduino/default
+BRIDGE=/root/app/k230_phone_ui/k230_meshtastic_ble_bridge
+DAEMON_PID=/var/run/meshtasticd.pid
+BRIDGE_PID=/var/run/k230_meshtastic_ble_bridge.pid
+DAEMON_LOG=/tmp/k230_meshtasticd.log
+BRIDGE_LOG=/tmp/k230_meshtastic_ble_bridge.log
+SETTINGS=/root/.config/k230_phone_ui/settings.conf
+
+[ -x "$DAEMON" ] || exit 0
+[ -x "$BRIDGE" ] || BRIDGE=/usr/bin/k230_meshtastic_ble_bridge
+
+pref() {
+	v=$(sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tail -n 1)
+	echo "${v:-$2}"
+}
+
+running() {
+	[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+bridge_wanted() {
+	[ "$(pref ble.enabled 1)" != "0" ] && [ "$(pref ble.mode mesh)" != "custom" ]
+}
+
+start_daemon() {
+	running "$DAEMON_PID" && return 0
+	if pidof k230_meshtastic_probe >/dev/null 2>&1; then
+		echo "meshtasticd: the launcher's Meshtastic daemon holds the radio"
+		return 1
+	fi
+	printf "Starting meshtasticd: "
+	mkdir -p "$FSDIR"
+	HOME=/root start-stop-daemon -S -q -b -m -p "$DAEMON_PID" -x /bin/sh -- \
+		-c "exec $DAEMON -c $CONFIG -d $FSDIR >> $DAEMON_LOG 2>&1"
+	echo "OK"
+}
+
+start_bridge() {
+	running "$BRIDGE_PID" && return 0
+	[ -x "$BRIDGE" ] || return 0
+	printf "Starting Meshtastic BLE bridge: "
+	start-stop-daemon -S -q -b -m -p "$BRIDGE_PID" -x /bin/sh -- \
+		-c "exec $BRIDGE >> $BRIDGE_LOG 2>&1"
+	echo "OK"
+}
+
+stop_pid() {
+	running "$1" || {
+		rm -f "$1"
+		return 0
+	}
+	pid=$(cat "$1")
+	kill "$pid" 2>/dev/null
+	# meshtasticd flushes its prefs on the way out.
+	i=0
+	while [ $i -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+		usleep 500000
+		i=$((i + 1))
+	done
+	kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+	rm -f "$1"
+}
+
+stop_bridge() {
+	printf "Stopping Meshtastic BLE bridge: "
+	stop_pid "$BRIDGE_PID"
+	echo "OK"
+}
+
+stop_daemon() {
+	printf "Stopping meshtasticd: "
+	stop_pid "$DAEMON_PID"
+	echo "OK"
+}
+
+# Run the bridge only while the daemon runs and Bluetooth is in Meshtastic mode.
+reconcile_bridge() {
+	if running "$DAEMON_PID" && bridge_wanted; then
+		start_bridge
+	elif running "$BRIDGE_PID"; then
+		stop_bridge
+	fi
+}
+
+case "$1" in
+start)
+	if [ "$(pref meshtasticd.autostart 1)" = "0" ]; then
+		echo "meshtasticd: autostart is off"
+		exit 0
+	fi
+	start_daemon && reconcile_bridge
+	;;
+run)
+	start_daemon && reconcile_bridge
+	;;
+stop)
+	stop_bridge
+	stop_daemon
+	;;
+restart)
+	stop_bridge
+	stop_daemon
+	start_daemon && reconcile_bridge
+	;;
+bridge)
+	reconcile_bridge
+	;;
+status)
+	running "$DAEMON_PID" && echo "meshtasticd: running" || echo "meshtasticd: stopped"
+	running "$BRIDGE_PID" && echo "bridge: running" || echo "bridge: stopped"
+	;;
+*)
+	echo "Usage: $0 {start|run|stop|restart|bridge|status}"
+	exit 1
+	;;
+esac

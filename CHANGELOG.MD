@@ -2,6 +2,17 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Added a start/stop page for the official Meshtastic firmware. When
+  `meshtasticd` is installed, the Meshtastic app and hotkey open a page that
+  starts and stops it, shows its log, and shows the pairing PIN when a phone
+  pairs over Bluetooth. A new `k230_meshtastic_ble_bridge` serves meshtasticd
+  to the Meshtastic phone app through the nRF52840's Meshtastic BLE service.
+  `/etc/init.d/S90meshtasticd` starts both at boot; set
+  `meshtasticd.autostart=0` in settings.conf to keep it stopped. Without
+  `meshtasticd` the launcher's own Meshtastic app works as before.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,

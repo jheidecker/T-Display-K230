@@ -1,4 +1,5 @@
 #include "ui_meshtastic.h"
+#include "ui_meshtasticd.h"
 
 #include "ui_audio.h"
 #include "ui_ble.h"
@@ -1022,6 +1023,9 @@ static int mesh_status_is_online(const char *status)
 
 int ui_meshtastic_is_running(void)
 {
+    if(ui_meshtasticd_installed()) {
+        return ui_meshtasticd_is_running();
+    }
     char response[512];
 
     if(mesh_ipc_command("STATUS\n", response, sizeof(response)) != 0) {
@@ -1879,6 +1883,9 @@ static int mesh_apply_media_runtime_config(void)
 
 int ui_meshtastic_autostart_enabled(void)
 {
+    if(ui_meshtasticd_installed()) {
+        return ui_meshtasticd_autostart_enabled();
+    }
     char value[8];
 
     ui_prefs_get(MESHTASTIC_PREF_AUTOSTART, value, sizeof(value), "1");
@@ -1887,6 +1894,10 @@ int ui_meshtastic_autostart_enabled(void)
 
 void ui_meshtastic_set_autostart_enabled(int enabled)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_set_autostart_enabled(enabled);
+        return;
+    }
     ui_prefs_set(MESHTASTIC_PREF_AUTOSTART, enabled ? "1" : "0");
 }
 
@@ -4624,6 +4635,10 @@ static void mesh_stop_event_cb(lv_event_t *event)
 
 void ui_meshtastic_pause_for_radio_owner(const char *owner)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_pause_for_radio_owner(owner);
+        return;
+    }
     char response[512];
     char quit_response[256];
 
@@ -4665,6 +4680,10 @@ void ui_meshtastic_pause_for_radio_owner(const char *owner)
 
 void ui_meshtastic_resume_after_radio_owner(void)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_resume_after_radio_owner();
+        return;
+    }
     char owner[sizeof(mesh_radio_pause_owner)];
 
     if(!mesh_radio_pause_active) {
@@ -4690,6 +4709,10 @@ void ui_meshtastic_resume_after_radio_owner(void)
 
 void ui_meshtastic_release_radio_owner_foreground(void)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_resume_after_radio_owner();
+        return;
+    }
     char owner[sizeof(mesh_radio_pause_owner)];
 
     if(!mesh_radio_pause_active) {
@@ -4735,6 +4758,10 @@ static void mesh_restart_daemon_if_online(void)
 
 void ui_meshtastic_apply_ble_setting(void)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_apply_ble_setting();
+        return;
+    }
     if(!ui_ble_meshtastic_bridge_enabled()) {
         app_set_ble_status("offline");
     }
@@ -15333,12 +15360,18 @@ static void mesh_voice_event_cb(lv_event_t *event)
 
 void ui_meshtastic_trigger_voice_key(void)
 {
+    if(ui_meshtasticd_installed()) {
+        return;
+    }
     ui_meshtastic_handle_voice_key(1);
     ui_meshtastic_handle_voice_key(0);
 }
 
 void ui_meshtastic_handle_voice_key(int pressed)
 {
+    if(ui_meshtasticd_installed()) {
+        return;
+    }
     if(!app_current_page_is(PAGE_MESHTASTIC)) {
         return;
     }
@@ -15411,6 +15444,10 @@ static lv_obj_t *mesh_panel_title(lv_obj_t *parent, const char *title,
 
 void ui_meshtastic_startup(void)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_startup();
+        return;
+    }
     if(!ui_meshtastic_autostart_enabled()) {
         mesh_append_log("autostart disabled");
         return;
@@ -15422,6 +15459,10 @@ void ui_meshtastic_startup(void)
 
 void ui_meshtastic_create(lv_obj_t *scr)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_create(scr);
+        return;
+    }
     lv_obj_t *btn;
     int top_y = ui_is_landscape() ? 64 : 124;
     int x = ui_page_panel_x();
@@ -15610,6 +15651,10 @@ void ui_meshtastic_create(lv_obj_t *scr)
 
 void ui_meshtastic_cleanup(void)
 {
+    if(ui_meshtasticd_installed()) {
+        ui_meshtasticd_cleanup();
+        return;
+    }
     if(mesh_voice_record_pid > 0) {
         (void)mesh_voice_record_stop(0, "CLEANUP");
     }
@@ -15676,6 +15721,9 @@ void ui_meshtastic_cleanup(void)
 
 int ui_meshtastic_handle_back(void)
 {
+    if(ui_meshtasticd_installed()) {
+        return 0;
+    }
     if(mesh_photo_preview_overlay && lv_obj_is_valid(mesh_photo_preview_overlay)) {
         mesh_photo_preview_close();
         return 1;
