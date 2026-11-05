@@ -6,11 +6,14 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MESHTASTICD_BIN "/usr/bin/meshtasticd"
@@ -22,6 +25,10 @@
 #define MESHTASTICD_PREF_AUTOSTART "meshtasticd.autostart"
 #define MESHTASTICD_LOG_TAIL_BYTES 2048
 #define MESHTASTICD_LOG_TAIL_LINES 6
+/* Before this the system clock was never set; it starts at 1970 */
+#define MESHTASTICD_CLOCK_VALID_EPOCH ((time_t)1767225600) /* 2026-01-01 */
+#define MESHTASTICD_CLOCK_STEP_US (60LL * 1000000LL)
+#define MESHTASTICD_CLOCK_CHECK_MS 2000
 
 typedef struct {
     char name[48];
@@ -37,6 +44,10 @@ static char meshtasticd_action_text[96];
 static char meshtasticd_version[48];
 
 static lv_timer_t *meshtasticd_timer;
+static lv_timer_t *meshtasticd_clock_timer;
+static int64_t meshtasticd_clock_offset_us;
+/* The stale-start restart runs once, so a failing restart can't loop */
+static int meshtasticd_clock_stale_restarted;
 static lv_obj_t *meshtasticd_status_label;
 static lv_obj_t *meshtasticd_ble_label;
 static lv_obj_t *meshtasticd_pin_label;
@@ -145,8 +156,95 @@ static void meshtasticd_start_action(const char *verb, const char *busy_text)
     }
 }
 
+static int64_t meshtasticd_clock_offset_now(void)
+{
+    struct timespec real;
+    struct timespec mono;
+
+    clock_gettime(CLOCK_REALTIME, &real);
+    clock_gettime(CLOCK_MONOTONIC, &mono);
+    return ((int64_t)real.tv_sec - (int64_t)mono.tv_sec) * 1000000LL +
+           ((int64_t)real.tv_nsec - (int64_t)mono.tv_nsec) / 1000LL;
+}
+
+static void meshtasticd_log_line(const char *fmt, ...)
+{
+    FILE *fp = fopen(MESHTASTICD_LOG, "a");
+    va_list ap;
+
+    if(!fp) {
+        return;
+    }
+    fputs("k230_phone_ui: ", fp);
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+/*
+ * meshtasticd reads the system clock once, at startup, and keeps its own time
+ * from there. At boot the clock is still at 1970: there's no RTC, and Wi-Fi,
+ * LTE and GNSS come later. meshtasticd then stamps packets and nodes with
+ * uptime-based times until a phone or another node gives it the time.
+ * Restart it once the clock is set (its pid file, written at start, is older
+ * than any valid time), and again if the clock later jumps by over a minute.
+ */
+static void meshtasticd_clock_timer_cb(lv_timer_t *timer)
+{
+    int64_t offset = meshtasticd_clock_offset_now();
+    int64_t step_us = offset - meshtasticd_clock_offset_us;
+    int stepped = llabs(step_us) >= MESHTASTICD_CLOCK_STEP_US;
+    int stale_start = 0;
+    struct stat st;
+    int busy;
+    int paused;
+
+    (void)timer;
+    if(time(NULL) < MESHTASTICD_CLOCK_VALID_EPOCH) {
+        return;
+    }
+    if(!meshtasticd_clock_stale_restarted &&
+       stat(MESHTASTICD_PID, &st) == 0 &&
+       st.st_mtime < MESHTASTICD_CLOCK_VALID_EPOCH) {
+        stale_start = ui_meshtasticd_is_running();
+    }
+    if(!stepped && !stale_start) {
+        return;
+    }
+    pthread_mutex_lock(&meshtasticd_lock);
+    busy = meshtasticd_busy;
+    paused = meshtasticd_paused;
+    pthread_mutex_unlock(&meshtasticd_lock);
+    if(busy) {
+        return; /* try again on the next tick */
+    }
+    meshtasticd_clock_offset_us = offset;
+    /* Paused for the LoRa page: it restarts with the new time on resume */
+    if(paused || !ui_meshtasticd_is_running()) {
+        return;
+    }
+    meshtasticd_clock_stale_restarted |= stale_start;
+    if(stepped) {
+        meshtasticd_log_line("clock stepped %+.0f s, restarting meshtasticd",
+                             (double)step_us / 1e6);
+    } else {
+        meshtasticd_log_line("meshtasticd started before the clock was set, "
+                             "restarting it");
+    }
+    meshtasticd_start_action("restart", "Restarting for the new time...");
+}
+
 void ui_meshtasticd_startup(void)
 {
+    if(!meshtasticd_clock_timer) {
+        meshtasticd_clock_offset_us = meshtasticd_clock_offset_now();
+        meshtasticd_clock_timer = lv_timer_create(meshtasticd_clock_timer_cb,
+                                                  MESHTASTICD_CLOCK_CHECK_MS,
+                                                  NULL);
+    }
+
     /* At boot S90meshtasticd has already run; after an nRF52840 update the
      * daemon is still up but the bridge was stopped. */
     if(ui_meshtasticd_is_running()) {

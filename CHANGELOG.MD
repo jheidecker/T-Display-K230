@@ -13,7 +13,9 @@
   `meshtasticd.autostart=0` in settings.conf to keep it stopped. Without
   `meshtasticd` the launcher's own Meshtastic app works as before. The
   startup LoRa probe is skipped while meshtasticd runs or starts at boot, so
-  it doesn't reset the radio under it.
+  it doesn't reset the radio under it. meshtasticd reads the system clock only
+  at startup, and at boot that's still 1970, so the launcher restarts it once
+  the clock is set, and again if the clock jumps by more than a minute.
 
 ## v0.2.9 - 2026-11-02
 
