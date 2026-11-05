@@ -3,6 +3,7 @@
 #include "ui_i18n.h"
 #include "ui_hardware.h"
 #include "ui_input.h"
+#include "ui_meshtasticd.h"
 #include "ui_nrf9151_manager.h"
 #include "ui_prefs.h"
 
@@ -1829,6 +1830,17 @@ int ui_lora_startup_probe(void)
 {
     lora_profile_t probe;
     int state;
+
+    /* The official meshtasticd owns the radio while it runs, and S90 or
+     * ui_meshtasticd_startup() starts it when autostart is on. Probing would
+     * reset the SX1262 under it, or fail on the busy radio and hide the
+     * Meshtastic app that controls it. It only runs on boards with LoRa. */
+    if(ui_meshtasticd_installed() &&
+       (ui_meshtasticd_is_running() || ui_meshtasticd_autostart_enabled())) {
+        lora_hardware_available = 1;
+        lora_log("Startup probe skipped: meshtasticd owns the radio");
+        return 0;
+    }
 
     if(!lora_profiles_loaded) {
         lora_load_profiles();

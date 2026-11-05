@@ -94,6 +94,9 @@ fi
 
 install -D -m 0755 "$LAUNCHER_DIR/rootfs_overlay/etc/init.d/S99zz_k230_phone_ui" \
     "$ROOTFS_DIR/etc/init.d/S99zz_k230_phone_ui"
+# Exits early unless meshtasticd is installed.
+install -D -m 0755 "$LAUNCHER_DIR/rootfs_overlay/etc/init.d/S90meshtasticd" \
+    "$ROOTFS_DIR/etc/init.d/S90meshtasticd"
 
 mkdir -p "$ROOTFS_DIR/root/music" "$ROOTFS_DIR/root/nes" "$ROOTFS_DIR/root/videos" \
     "$ROOTFS_DIR/root/photos" "$ROOTFS_DIR/root/screenshots" "$ROOTFS_DIR/root/qrcode" \

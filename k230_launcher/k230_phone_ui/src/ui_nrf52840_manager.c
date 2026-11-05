@@ -15,6 +15,8 @@
 #define NRF52840_DFU_TOOL "/root/app/k230_phone_ui/k230_nrf52840_dfu"
 #define NRF52840_UART_DEV "/dev/ttyS1"
 #define NRF52840_MESHTASTIC_PROC "k230_meshtastic_probe"
+/* meshtasticd's phone bridge also holds the UART; see S90meshtasticd. */
+#define NRF52840_MESHTASTIC_BRIDGE_PROC "k230_meshtastic_ble_bridge"
 #define NRF52840_PROBE_RETRY_US 2000000ULL
 #define NRF52840_STARTUP_PROBE_ATTEMPTS 4
 
@@ -515,7 +517,8 @@ int ui_nrf52840_begin_dfu(int timeout_ms, char *message, size_t message_len)
         if(ui_nrf52840_get_status(&status) == 0 &&
            status.owner == NRF52840_OWNER_MESHTASTIC) {
             nrf52840_log("force pause meshtastic for dfu");
-            if(system("killall " NRF52840_MESHTASTIC_PROC " >/dev/null 2>&1 || true") == -1) {
+            if(system("killall " NRF52840_MESHTASTIC_PROC " "
+                      NRF52840_MESHTASTIC_BRIDGE_PROC " >/dev/null 2>&1 || true") == -1) {
                 nrf52840_log("killall meshtastic failed");
             }
             ui_nrf52840_release(NRF52840_OWNER_MESHTASTIC);
@@ -540,7 +543,8 @@ int ui_nrf52840_begin_dfu(int timeout_ms, char *message, size_t message_len)
     ui_nrf52840_switch_mode(NRF52840_MODE_DFU);
     nrf52840_log("pause meshtastic for dfu previous=%s",
                  ui_nrf52840_mode_name(previous_mode));
-    if(system("killall " NRF52840_MESHTASTIC_PROC " >/dev/null 2>&1 || true") == -1) {
+    if(system("killall " NRF52840_MESHTASTIC_PROC " "
+              NRF52840_MESHTASTIC_BRIDGE_PROC " >/dev/null 2>&1 || true") == -1) {
         nrf52840_log("killall meshtastic failed");
     }
     usleep(300000);
