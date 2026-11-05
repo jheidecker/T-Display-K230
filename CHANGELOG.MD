@@ -21,6 +21,10 @@
   point that refuses the first attempt can exceed, and then asked for no
   lease until the next retry. It now waits up to 45 s for the access point
   and keeps asking for a lease in the background until one comes.
+- Turned Wi-Fi power save off after connecting. The RTL8189FS driver
+  starts in its deepest power save, where pings to the device averaged
+  1.4 s against 0.18 s with it off. Set `wifi.power_save=1` to keep it on.
+  wpa_supplicant now also logs to syslog (`/tmp/messages`).
 
 ## v0.2.9 - 2026-11-02
 

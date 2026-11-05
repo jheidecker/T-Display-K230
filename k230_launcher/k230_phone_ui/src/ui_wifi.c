@@ -21,6 +21,7 @@
 #define WIFI_PROFILE_PATH "/root/app/k230_phone_ui/wifi_profiles.conf"
 #define WIFI_PROFILE_TMP_PATH "/root/app/k230_phone_ui/wifi_profiles.conf.tmp"
 #define WIFI_PREF_ENABLED "wifi.enabled"
+#define WIFI_PREF_POWER_SAVE "wifi.power_save"
 #define WIFI_MAX_PROFILES 12
 #define WIFI_SCAN_WAIT_STEP_US 100000U
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
@@ -882,10 +883,13 @@ static int wifi_write_config(const char *ssid, const char *password)
 static int wifi_write_connect_script(void)
 {
     FILE *fp = fopen("/tmp/k230_wifi_connect.sh", "w");
+    char power_save[8];
 
     if(!fp) {
         return -1;
     }
+
+    ui_prefs_get(WIFI_PREF_POWER_SAVE, power_save, sizeof(power_save), "0");
 
     fprintf(fp, "#!/bin/sh\n");
     fprintf(fp, "LOG='%s'\n", WIFI_CONNECT_LOG);
@@ -898,7 +902,8 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "if [ -f /var/run/udhcpc.$IF.pid ]; then kill $(cat /var/run/udhcpc.$IF.pid) >>$LOG 2>&1 || true; rm -f /var/run/udhcpc.$IF.pid; fi\n");
     fprintf(fp, "rm -f /var/run/wpa_supplicant/$IF\n");
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
-    fprintf(fp, "wpa_supplicant -B -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /* -s: which AP it joins, roams to or drops goes to /tmp/messages */
+    fprintf(fp, "wpa_supplicant -B -s -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
     /*
      * Wait up to 45 s. After a reboot the APs refused the first association
      * attempts and wpa_supplicant backed off for 10 s, so it took 25 s; the
@@ -913,6 +918,14 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "  sleep 1\n");
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
+    /*
+     * The RTL8189FS driver loads with its deepest power save (LPS). With it,
+     * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
+     * averaged 0.18 s. The driver also logs rtw_lps_state_chk warnings when
+     * leaving LPS. Keep it off unless wifi.power_save=1.
+     */
+    fprintf(fp, "iwconfig $IF power %s >>$LOG 2>&1 || true\n",
+            strcmp(power_save, "1") == 0 ? "on" : "off");
     /*
      * No -q: udhcpc goes to the background once it has a lease and renews
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
