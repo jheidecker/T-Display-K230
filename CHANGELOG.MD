@@ -2,6 +2,15 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed the clock staying at 1970, or taking minutes to set, after boot. The
+  K230 has no RTC, and ntpd starts before Wi-Fi is up. The launcher now sets
+  the clock from the first source that knows the time: NTP as soon as Wi-Fi
+  has a route, LTE network time from the nRF9151 (`AT+CCLK?`), or a GNSS fix.
+  Later readings only correct it. Changes are logged to
+  `/tmp/k230_clock_sync.log`.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,

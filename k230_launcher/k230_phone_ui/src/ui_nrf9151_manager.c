@@ -1,4 +1,5 @@
 #include "ui_nrf9151_manager.h"
+#include "ui_time_sync.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -1877,6 +1878,53 @@ static int nrf9151_manager_signal_level_from_cesq(const char *line)
     return 4;
 }
 
+/*
+ * +CCLK: "yy/MM/dd,hh:mm:ss+zz". The nRF9151 reports UTC here, then the local
+ * offset in quarter hours: "26/11/05,03:23:16-24" came back at 03:23:19 UTC.
+ */
+static void nrf9151_manager_offer_network_time(const char *line)
+{
+    const char *quote = line ? strchr(line, '"') : NULL;
+    int yy;
+    int mo;
+    int dd;
+    int hh;
+    int mi;
+    int ss;
+    time_t utc;
+
+    if(!quote || sscanf(quote + 1, "%d/%d/%d,%d:%d:%d", &yy, &mo, &dd, &hh,
+                        &mi, &ss) != 6) {
+        return;
+    }
+    utc = k230_time_sync_utc(2000 + yy, mo, dd, hh, mi, ss);
+    if(utc != (time_t)-1) {
+        k230_time_sync_offer(K230_TIME_SOURCE_LTE, utc, 0);
+    }
+}
+
+/* NMEA hhmmss.ss and ddmmyy, from a sentence that reports a valid fix */
+static void nrf9151_manager_offer_nmea_time(const char *hms, const char *dmy)
+{
+    int hh;
+    int mi;
+    int ss;
+    int dd;
+    int mo;
+    int yy;
+    time_t utc;
+
+    if(!hms || !dmy || strlen(hms) < 6U || strlen(dmy) != 6U ||
+       sscanf(hms, "%2d%2d%2d", &hh, &mi, &ss) != 3 ||
+       sscanf(dmy, "%2d%2d%2d", &dd, &mo, &yy) != 3) {
+        return;
+    }
+    utc = k230_time_sync_utc(2000 + yy, mo, dd, hh, mi, ss);
+    if(utc != (time_t)-1) {
+        k230_time_sync_offer(K230_TIME_SOURCE_GNSS, utc, 0);
+    }
+}
+
 static void nrf9151_manager_update_lte_from_response(
     k230_nrf9151_status_t *status, const char *cmd, const char *resp, int rc)
 {
@@ -1950,6 +1998,10 @@ static void nrf9151_manager_update_lte_from_response(
             snprintf(status->lte_status, sizeof(status->lte_status), "%s",
                      "LTE registration unknown");
         }
+    }
+    if(nrf9151_manager_line_containing(resp, "+CCLK:", line,
+                                       sizeof(line)) == 0) {
+        nrf9151_manager_offer_network_time(line);
     }
     if(nrf9151_manager_line_containing(resp, "+CESQ:", line,
                                        sizeof(line)) == 0) {
@@ -2189,6 +2241,7 @@ static int nrf9151_manager_run_lte_check_common(
         "AT+CIMI",
         "AT+CEREG=5",
         "AT+CEREG?",
+        "AT+CCLK?",
         "AT+CESQ",
         "AT%XMONITOR",
         "AT+COPS?",
@@ -2822,11 +2875,26 @@ static void nrf9151_manager_process_gnss_pos(
         char date[24];
         char utc[24];
 
+        int yy;
+        int mo;
+        int dd;
+        int hh;
+        int mi;
+        int ss;
+
         if(sscanf(datetime, "%23[^ ] %23s", date, utc) == 2) {
             snprintf(status->gnss_utc_date, sizeof(status->gnss_utc_date),
                      "%s", date);
             snprintf(status->gnss_utc_time, sizeof(status->gnss_utc_time),
                      "%s UTC", utc);
+        }
+        if(sscanf(datetime, "%d-%d-%d %d:%d:%d", &yy, &mo, &dd, &hh, &mi,
+                  &ss) == 6) {
+            time_t fix_utc = k230_time_sync_utc(yy, mo, dd, hh, mi, ss);
+
+            if(fix_utc != (time_t)-1) {
+                k230_time_sync_offer(K230_TIME_SOURCE_GNSS, fix_utc, 0);
+            }
         }
     }
     (void)accuracy;
@@ -2901,6 +2969,9 @@ static void nrf9151_manager_process_nmea_sentence(
         }
         if(count > 9) {
             nrf9151_manager_set_utc_date(status, fields[9]);
+            if(fields[2][0] == 'A') {
+                nrf9151_manager_offer_nmea_time(fields[1], fields[9]);
+            }
         }
         if(count > 6 && fields[2][0] == 'A' &&
            nrf9151_manager_coord_to_double(fields[3], fields[4], &lat) &&
