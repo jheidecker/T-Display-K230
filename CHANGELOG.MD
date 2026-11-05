@@ -11,7 +11,9 @@
   to the Meshtastic phone app through the nRF52840's Meshtastic BLE service.
   `/etc/init.d/S90meshtasticd` starts both at boot; set
   `meshtasticd.autostart=0` in settings.conf to keep it stopped. Without
-  `meshtasticd` the launcher's own Meshtastic app works as before.
+  `meshtasticd` the launcher's own Meshtastic app works as before. The
+  startup LoRa probe is skipped while meshtasticd runs or starts at boot, so
+  it doesn't reset the radio under it.
 
 ## v0.2.9 - 2026-11-02
 
