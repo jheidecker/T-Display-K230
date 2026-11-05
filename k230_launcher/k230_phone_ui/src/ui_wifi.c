@@ -27,6 +27,7 @@
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
 #define WIFI_MODULE_LOG "/tmp/k230_wifi_modprobe.log"
 #define WIFI_CONNECT_LOG_MAX_BYTES 65536L
+#define WIFI_LAST_IP_PATH UI_PREFS_DIR "/wifi_last_ip"
 #define WIFI_WATCHDOG_POLL_S 10U
 #define WIFI_WATCHDOG_GRACE_US (60ULL * 1000000ULL)
 #define WIFI_WATCHDOG_BACKOFF_MIN_US (30ULL * 1000000ULL)
@@ -931,12 +932,20 @@ static int wifi_write_connect_script(void)
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
      * could hand the address to another client while we kept using it.
      *
+     * -r asks for the last address we held. Without it every connect was a
+     * bare DISCOVER, and the router handed out a different address each
+     * time (.142, .153, .147, .145 on one Deco). -x hostname names the
+     * device in the router's client list.
+     *
      * -b instead of -n: when no lease comes (not associated yet, or no DHCP
      * answer), udhcpc keeps trying in the background every few seconds
      * rather than exiting. Before, a late association left Wi-Fi up with no
      * address until the watchdog restarted everything.
      */
-    fprintf(fp, "dhcp() { udhcpc -b -t $1 -A 5 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1; }\n");
+    fprintf(fp, "LAST='%s'\n", WIFI_LAST_IP_PATH);
+    fprintf(fp, "last=$(cat $LAST 2>/dev/null)\n");
+    fprintf(fp, "case \"$last\" in ''|*[!0-9.]*) req='' ;; *) req=\"-r $last\" ;; esac\n");
+    fprintf(fp, "dhcp() { udhcpc -b -t $1 -A 5 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1; }\n");
     fprintf(fp, "if [ \"$state\" != 'COMPLETED' ]; then\n");
     fprintf(fp, "  echo '[shell] not associated yet, DHCP keeps trying in the background' >>$LOG\n");
     fprintf(fp, "  dhcp 1\n");
@@ -945,6 +954,7 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "dhcp 8\n");
     fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
     fprintf(fp, "[ -n \"$ip\" ] || exit 13\n");
+    fprintf(fp, "[ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
