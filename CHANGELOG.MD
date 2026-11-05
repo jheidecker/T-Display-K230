@@ -2,6 +2,18 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed nRF9151 GNSS not getting a first fix while LTE stayed registered
+  without power saving. GNSS now pauses LTE until the first fix or for up to
+  5 minutes, then brings LTE back, and pauses it again after 30 minutes
+  without a fix. Until the first fix, GNSS keeps the modem UART and streams
+  NMEA even for background requests, so the fix is seen; background polling
+  takes over after it. Set `nrf9151.gnss.lte_pause=0` in settings.conf to
+  keep LTE on.
+- Fixed the Cellular app's LTE status going stale while GNSS held the modem
+  UART. The GNSS thread now refreshes it with NMEA output paused.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,

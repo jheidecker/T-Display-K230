@@ -39,6 +39,8 @@
 #define K230_NRF9151_HTTP_TIMEOUT_US 60000000ULL
 #define K230_NRF9151_MQTT_TIMEOUT_US 30000000ULL
 #define K230_NRF9151_GNSS_NMEA_RESTART_US (15ULL * 1000000ULL)
+#define K230_NRF9151_GNSS_LTE_PAUSE_MAX_US (300ULL * 1000000ULL)
+#define K230_NRF9151_GNSS_LTE_PAUSE_RETRY_US (1800ULL * 1000000ULL)
 #define K230_NRF9151_GNSS_BACKGROUND_POLL_US (30ULL * 1000000ULL)
 #define K230_NRF9151_GNSS_REQUEST_MIN_US (30ULL * 1000000ULL)
 #define K230_NRF9151_LTE_BOOTSTRAP_WAIT_US (15ULL * 1000000ULL)
@@ -53,6 +55,7 @@
 #define K230_NRF9151_PREF_FILE K230_NRF9151_PREF_DIR "/settings.conf"
 #define K230_NRF9151_PREF_LOCATION_AUTOSTART "nrf9151.location.autostart"
 #define K230_NRF9151_PREF_GNSS_CLOUD_ASSISTANCE "nrf9151.gnss.cloud_assistance"
+#define K230_NRF9151_PREF_GNSS_LTE_PAUSE "nrf9151.gnss.lte_pause"
 #define K230_NRF9151_GNSS_OWNER_LEGACY (1U << 0)
 #define K230_NRF9151_GNSS_OWNER_CELLULAR (1U << 1)
 #define K230_NRF9151_GNSS_OWNER_MESHTASTIC (1U << 2)
@@ -65,12 +68,16 @@ typedef struct {
     int active;
     int configured;
     int first_fix_reported;
+    int lte_pause_enabled;
+    int lte_paused;
+    int lte_poll_request;
     unsigned int owners;
     uint64_t session_start_us;
     uint64_t last_fix_us;
     uint64_t last_nmea_us;
     uint64_t last_restart_us;
     uint64_t next_background_poll_us;
+    uint64_t lte_pause_start_us;
     char line[256];
     size_t line_used;
 } k230_nrf9151_gnss_monitor_t;
@@ -1817,6 +1824,7 @@ static int nrf9151_manager_run_cmd_logged(int fd, const char *cmd,
                                           k230_nrf9151_cancel_cb_t cancel_cb,
                                           void *cancel_user);
 static int nrf9151_manager_gnss_cloud_assistance_enabled(void);
+static int nrf9151_manager_gnss_holding_for_fix(void);
 
 static void nrf9151_manager_quiesce_gnss_output(int fd, char *log,
                                                 size_t log_len)
@@ -2170,6 +2178,49 @@ static int nrf9151_manager_wait_for_data_ready(
     }
 }
 
+static void nrf9151_manager_reset_lte_fields(k230_nrf9151_status_t *status)
+{
+    status->present = 0;
+    status->link_ok = 0;
+    status->sim_ready = 0;
+    status->lte_registered = 0;
+    status->packet_attached = 0;
+    status->pdp_active = 0;
+    status->lte_signal_level = 0;
+    snprintf(status->sim_status, sizeof(status->sim_status), "%s", "--");
+    snprintf(status->operator_name, sizeof(status->operator_name), "%s", "--");
+    snprintf(status->ip, sizeof(status->ip), "%s", "--");
+    snprintf(status->apn, sizeof(status->apn), "%s", "--");
+    snprintf(status->signal_text, sizeof(status->signal_text), "%s", "--");
+}
+
+static void nrf9151_manager_finish_lte_status(k230_nrf9151_status_t *status)
+{
+    if(!status->link_ok) {
+        snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                 "No AT response");
+    } else if(!status->sim_ready) {
+        snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                 "SIM not ready");
+    } else if(status->lte_registered || status->packet_attached ||
+              status->pdp_active) {
+        snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+                 status->ip[0] && strcmp(status->ip, "--") != 0 ?
+                 "Online" : "Registered");
+    }
+}
+
+static void nrf9151_manager_mark_lte_paused(k230_nrf9151_status_t *status)
+{
+    status->lte_registered = 0;
+    status->packet_attached = 0;
+    status->pdp_active = 0;
+    status->lte_signal_level = 0;
+    status->lte_signal_valid = 0;
+    snprintf(status->lte_status, sizeof(status->lte_status), "%s",
+             "Paused for GNSS fix");
+}
+
 static int nrf9151_manager_run_lte_check_common(
     k230_nrf9151_status_t *status, char *log, size_t log_len,
     k230_nrf9151_cancel_cb_t cancel_cb, void *cancel_user,
@@ -2256,18 +2307,7 @@ static int nrf9151_manager_run_lte_check_common(
         return -1;
     }
 
-    local.present = 0;
-    local.link_ok = 0;
-    local.sim_ready = 0;
-    local.lte_registered = 0;
-    local.packet_attached = 0;
-    local.pdp_active = 0;
-    local.lte_signal_level = 0;
-    snprintf(local.sim_status, sizeof(local.sim_status), "%s", "--");
-    snprintf(local.operator_name, sizeof(local.operator_name), "%s", "--");
-    snprintf(local.ip, sizeof(local.ip), "%s", "--");
-    snprintf(local.apn, sizeof(local.apn), "%s", "--");
-    snprintf(local.signal_text, sizeof(local.signal_text), "%s", "--");
+    nrf9151_manager_reset_lte_fields(&local);
     snprintf(local.lte_status, sizeof(local.lte_status), "%s",
              include_ping ? "Checking" : "Refreshing");
     snprintf(local.last_error, sizeof(local.last_error), "%s", "-");
@@ -2382,18 +2422,7 @@ static int nrf9151_manager_run_lte_check_common(
         local.epoch = time(NULL);
     }
 
-    if(!local.link_ok) {
-        snprintf(local.lte_status, sizeof(local.lte_status), "%s",
-                 "No AT response");
-    } else if(!local.sim_ready) {
-        snprintf(local.lte_status, sizeof(local.lte_status), "%s",
-                 "SIM not ready");
-    } else if(local.lte_registered || local.packet_attached ||
-              local.pdp_active) {
-        snprintf(local.lte_status, sizeof(local.lte_status), "%s",
-                 local.ip[0] && strcmp(local.ip, "--") != 0 ?
-                 "Online" : "Registered");
-    }
+    nrf9151_manager_finish_lte_status(&local);
     if(failures == 0) {
         snprintf(local.last_error, sizeof(local.last_error), "%s", "-");
     }
@@ -2509,8 +2538,24 @@ static void *nrf9151_manager_status_monitor_main(void *arg)
 
             pthread_mutex_lock(&nrf9151_manager_lock);
             int gnss_uart_owned = nrf9151_manager_gnss_uart_owned_locked();
+            /* A GNSS session that streams NMEA holds the UART; its thread
+             * polls LTE itself with NMEA output paused. */
+            int gnss_polls_lte =
+                nrf9151_gnss_monitor.configured &&
+                nrf9151_gnss_monitor.fd >= 0 &&
+                (nrf9151_manager_gnss_foreground_requested_locked() ||
+                 nrf9151_manager_gnss_holding_for_fix());
+            /* The LTE check sends AT+CFUN=1, which would end the pause */
+            int lte_paused = nrf9151_gnss_monitor.active &&
+                             nrf9151_gnss_monitor.lte_paused;
+
+            if(gnss_polls_lte) {
+                nrf9151_gnss_monitor.lte_poll_request = 1;
+            }
             pthread_mutex_unlock(&nrf9151_manager_lock);
-            if(gnss_uart_owned) {
+            if(gnss_polls_lte || lte_paused) {
+                rc = 0;
+            } else if(gnss_uart_owned) {
                 nrf9151_manager_mark_lte_deferred("GNSS owns UART");
                 rc = 0;
             } else if(!k230_nrf9151_mqtt_session_connected()) {
@@ -3025,10 +3070,11 @@ static void nrf9151_manager_process_gnss_line(char *line)
         if(!status.gnss_has_fix) {
             snprintf(status.gps_state, sizeof(status.gps_state), "%s",
                      "searching");
-            snprintf(status.gnss_status, sizeof(status.gnss_status),
+            snprintf(status.gnss_status, sizeof(status.gnss_status), "%s%s",
                      status.satellites > 0U ?
                      "Satellites visible, no fix" :
-                     "GNSS running, no satellites");
+                     "GNSS running, no satellites",
+                     nrf9151_gnss_monitor.lte_paused ? " (LTE paused)" : "");
         }
     } else if(strncmp(line, "#XGNSSPOS:", 10) == 0) {
         nrf9151_manager_process_gnss_pos(&status, line);
@@ -3171,6 +3217,195 @@ static int nrf9151_manager_gnss_should_stop(void)
     return stop;
 }
 
+static int nrf9151_manager_gnss_lte_pause_pref(void)
+{
+    char value[16];
+
+    if(nrf9151_manager_pref_get(K230_NRF9151_PREF_GNSS_LTE_PAUSE, value,
+                                sizeof(value), "1") != 0) {
+        return 1;
+    }
+    return atoi(value) != 0;
+}
+
+/*
+ * Until the first fix, GNSS keeps the UART and streams NMEA even for
+ * background owners, so the LTE pause sees the fix. Background polling only
+ * samples NMEA for a few seconds and can miss it. Polling takes over after
+ * the first fix.
+ */
+static int nrf9151_manager_gnss_holding_for_fix(void)
+{
+    return nrf9151_gnss_monitor.configured &&
+           (nrf9151_gnss_monitor.lte_paused ||
+            (nrf9151_gnss_monitor.lte_pause_enabled &&
+             nrf9151_gnss_monitor.last_fix_us == 0ULL));
+}
+
+static void nrf9151_manager_gnss_nmea_output(int fd, int enable)
+{
+    char resp[2048];
+    int rc;
+
+    rc = nrf9151_manager_exchange(fd, enable ? "AT#XNMEA=1" : "AT#XNMEA=0",
+                                  resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    if(rc != 0) {
+        nrf9151_manager_debug_log("GNSS cmd AT#XNMEA=%d rc=%d", enable, rc);
+    }
+    if(!enable) {
+        nrf9151_manager_drain_uart(fd, 80000ULL, 600000ULL);
+    }
+    nrf9151_gnss_monitor.line_used = 0;
+}
+
+/*
+ * GNSS shares the radio with LTE, and LTE idle-mode activity without PSM
+ * interrupts GNSS too often for a cold start to decode satellite time. Turn
+ * LTE off until the first fix; CFUN=20 leaves GNSS running.
+ */
+static int nrf9151_manager_gnss_pause_lte(int fd)
+{
+    char resp[512];
+    int rc;
+
+    rc = nrf9151_manager_exchange(fd, "AT+CFUN=20", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                  NULL, NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT+CFUN=20 rc=%d resp=%s", rc, resp);
+    if(rc != 0) {
+        return -1;
+    }
+    rc = nrf9151_manager_exchange(fd, "AT+CFUN=31", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+    nrf9151_manager_debug_log("GNSS cmd AT+CFUN=31 rc=%d resp=%s", rc, resp);
+    if(rc != 0) {
+        (void)nrf9151_manager_exchange(fd, "AT+CFUN=21", NULL, 0,
+                                       K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                       NULL, NULL);
+        return -1;
+    }
+    nrf9151_gnss_monitor.lte_paused = 1;
+    nrf9151_gnss_monitor.lte_pause_start_us = nrf9151_manager_monotonic_us();
+    return 0;
+}
+
+/* Expects NMEA output to be off. CFUN=21 brings LTE back without stopping GNSS */
+static void nrf9151_manager_gnss_resume_lte(int fd, const char *reason)
+{
+    char resp[2048];
+    int rc;
+
+    rc = nrf9151_manager_exchange(fd, "AT+CFUN=21", resp, sizeof(resp),
+                                  K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                  NULL, NULL);
+    nrf9151_manager_debug_log("GNSS LTE resume (%s) AT+CFUN=21 rc=%d resp=%s",
+                              reason, rc, resp);
+    nrf9151_gnss_monitor.lte_paused = 0;
+}
+
+/* LTE status query on the GNSS session's UART, with NMEA output paused */
+static void nrf9151_manager_gnss_poll_lte(int fd)
+{
+    static const char *const cmds[] = {
+        "AT%XSIM?",
+        "AT+CEREG?",
+        "AT+CESQ",
+        "AT+COPS?",
+        "AT+CGATT?",
+        "AT+CGACT?",
+        "AT+CGPADDR",
+        "AT+CGDCONT?",
+    };
+    k230_nrf9151_status_t status;
+
+    if(k230_nrf9151_read_status(&status, 0) != 0) {
+        k230_nrf9151_status_init(&status);
+    }
+    nrf9151_manager_reset_lte_fields(&status);
+    status.present = 1;
+    status.link_ok = 1;
+    if(!status.imei[0] || strcmp(status.imei, "--") == 0) {
+        (void)nrf9151_manager_run_cmd_logged(fd, "AT+CGSN",
+                                             K230_NRF9151_CMD_TIMEOUT_US,
+                                             &status, NULL, 0U, NULL, NULL);
+    }
+    if(!status.firmware[0] || strcmp(status.firmware, "--") == 0) {
+        (void)nrf9151_manager_run_cmd_logged(fd, "AT+CGMR",
+                                             K230_NRF9151_CMD_TIMEOUT_US,
+                                             &status, NULL, 0U, NULL, NULL);
+    }
+    for(size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        (void)nrf9151_manager_run_cmd_logged(fd, cmds[i],
+                                             K230_NRF9151_CMD_TIMEOUT_US,
+                                             &status, NULL, 0U, NULL, NULL);
+    }
+    nrf9151_manager_finish_lte_status(&status);
+    nrf9151_lte_last_refresh_epoch = time(NULL);
+    status.lte_status_age_s = 0;
+    status.epoch = time(NULL);
+    k230_nrf9151_write_status(&status);
+    nrf9151_manager_debug_log("GNSS LTE poll: %s", status.lte_status);
+}
+
+/* Runs while the GNSS thread holds the UART with NMEA output on */
+static void nrf9151_manager_gnss_lte_tick(int fd, uint64_t now_us)
+{
+    k230_nrf9151_status_t status;
+    uint64_t last_fix_or_start;
+    int poll;
+
+    pthread_mutex_lock(&nrf9151_manager_lock);
+    poll = nrf9151_gnss_monitor.lte_poll_request;
+    nrf9151_gnss_monitor.lte_poll_request = 0;
+    pthread_mutex_unlock(&nrf9151_manager_lock);
+
+    if(nrf9151_gnss_monitor.lte_paused) {
+        int got_fix = nrf9151_gnss_monitor.last_fix_us >
+                      nrf9151_gnss_monitor.lte_pause_start_us;
+
+        if(got_fix || now_us - nrf9151_gnss_monitor.lte_pause_start_us >
+                      K230_NRF9151_GNSS_LTE_PAUSE_MAX_US) {
+            nrf9151_manager_gnss_nmea_output(fd, 0);
+            nrf9151_manager_gnss_resume_lte(fd, got_fix ? "fix" : "timeout");
+            nrf9151_manager_gnss_poll_lte(fd);
+            nrf9151_manager_gnss_nmea_output(fd, 1);
+        }
+        /* SIM and LTE are off while paused, so there is nothing to poll */
+        return;
+    }
+
+    /* Retry the LTE-off window while GNSS has gone without a fix */
+    last_fix_or_start = nrf9151_gnss_monitor.last_fix_us ?
+                        nrf9151_gnss_monitor.last_fix_us :
+                        nrf9151_gnss_monitor.session_start_us;
+    if(nrf9151_gnss_monitor.lte_pause_enabled &&
+       now_us - last_fix_or_start > K230_NRF9151_GNSS_LTE_PAUSE_RETRY_US &&
+       now_us - nrf9151_gnss_monitor.lte_pause_start_us >
+       K230_NRF9151_GNSS_LTE_PAUSE_RETRY_US) {
+        nrf9151_manager_gnss_nmea_output(fd, 0);
+        if(nrf9151_manager_gnss_pause_lte(fd) == 0) {
+            if(k230_nrf9151_read_status(&status, 0) != 0) {
+                k230_nrf9151_status_init(&status);
+            }
+            nrf9151_manager_mark_lte_paused(&status);
+            status.epoch = time(NULL);
+            k230_nrf9151_write_status(&status);
+        } else {
+            /* Don't retry every tick if the modem refuses */
+            nrf9151_gnss_monitor.lte_pause_start_us = now_us;
+        }
+        nrf9151_manager_gnss_nmea_output(fd, 1);
+        return;
+    }
+
+    if(poll) {
+        nrf9151_manager_gnss_nmea_output(fd, 0);
+        nrf9151_manager_gnss_poll_lte(fd);
+        nrf9151_manager_gnss_nmea_output(fd, 1);
+    }
+}
+
 static int nrf9151_manager_start_gnss_locked(int fd, int background)
 {
     char resp[1024];
@@ -3251,10 +3486,16 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
             "GNSS cmd AT%%XSYSTEMMODE=1,1,1,0 rc=%d resp=%s",
             system_mode_rc, resp);
     }
-    rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp, sizeof(resp),
-                                  K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
-                                  NULL, NULL);
-    nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s", rc, resp);
+    nrf9151_gnss_monitor.lte_pause_enabled =
+        nrf9151_manager_gnss_lte_pause_pref();
+    if(!nrf9151_gnss_monitor.lte_pause_enabled ||
+       nrf9151_manager_gnss_pause_lte(fd) != 0) {
+        rc = nrf9151_manager_exchange(fd, "AT+CFUN=1", resp, sizeof(resp),
+                                      K230_NRF9151_CMD_TIMEOUT_US * 3ULL,
+                                      NULL, NULL);
+        nrf9151_manager_debug_log("GNSS cmd AT+CFUN=1 rc=%d resp=%s",
+                                  rc, resp);
+    }
     rc = nrf9151_manager_exchange(fd, "AT#XNMEA=1", resp, sizeof(resp),
                                   K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                   NULL);
@@ -3314,6 +3555,9 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
             snprintf(status.gps_state, sizeof(status.gps_state), "%s",
                      "error");
             status.gnss_running = 0;
+            if(nrf9151_gnss_monitor.lte_paused) {
+                nrf9151_manager_gnss_resume_lte(fd, "GNSS start failed");
+            }
             k230_nrf9151_write_status(&status);
             return -1;
         }
@@ -3352,8 +3596,12 @@ static int nrf9151_manager_start_gnss_locked(int fd, int background)
                  "%s", "LTE status deferred (GNSS owns UART)");
     }
     snprintf(status.gps_state, sizeof(status.gps_state), "%s", "searching");
-    snprintf(status.gnss_status, sizeof(status.gnss_status), "%s",
-             background ? "GNSS background polling" : "GNSS running");
+    snprintf(status.gnss_status, sizeof(status.gnss_status), "%s%s",
+             background ? "GNSS background polling" : "GNSS running",
+             nrf9151_gnss_monitor.lte_paused ? " (LTE paused)" : "");
+    if(nrf9151_gnss_monitor.lte_paused) {
+        nrf9151_manager_mark_lte_paused(&status);
+    }
     nrf9151_manager_status_set_gnss_phase(&status);
     status.epoch = time(NULL);
     k230_nrf9151_write_status(&status);
@@ -3522,7 +3770,7 @@ static void *nrf9151_manager_gnss_thread(void *arg)
         nrf9151_manager_mark_gnss_off("GNSS start failed after retries");
         return NULL;
     }
-    if(background) {
+    if(background && !nrf9151_manager_gnss_holding_for_fix()) {
         char resp[256];
 
         (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", resp, sizeof(resp),
@@ -3536,11 +3784,13 @@ static void *nrf9151_manager_gnss_thread(void *arg)
 
     while(!nrf9151_manager_gnss_should_stop()) {
         int foreground;
+        int hold;
         uint64_t now_us;
 
         pthread_mutex_lock(&nrf9151_manager_lock);
         foreground = nrf9151_manager_gnss_foreground_requested_locked();
         pthread_mutex_unlock(&nrf9151_manager_lock);
+        hold = foreground || nrf9151_manager_gnss_holding_for_fix();
         if(foreground && fd < 0) {
             if(nrf9151_manager_open_session("nrf9151-gnss", 8000, &lock_fd,
                                             &fd, NULL, 0) == 0) {
@@ -3552,7 +3802,7 @@ static void *nrf9151_manager_gnss_thread(void *arg)
                     nrf9151_manager_clear_gnss_session(&lock_fd, &fd);
                 }
             }
-        } else if(!foreground && fd >= 0) {
+        } else if(!hold && fd >= 0) {
             char resp[256];
 
             (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", resp,
@@ -3562,7 +3812,7 @@ static void *nrf9151_manager_gnss_thread(void *arg)
             nrf9151_manager_clear_gnss_session(&lock_fd, &fd);
             nrf9151_manager_mark_gnss_background();
         }
-        if(!foreground) {
+        if(!hold) {
             now_us = nrf9151_manager_monotonic_us();
             if(fd < 0 && now_us >= nrf9151_gnss_monitor.next_background_poll_us) {
                 nrf9151_manager_background_sample();
@@ -3616,7 +3866,10 @@ static void *nrf9151_manager_gnss_thread(void *arg)
                                            K230_NRF9151_CMD_TIMEOUT_US, NULL,
                                            NULL);
             usleep(120000);
-            (void)nrf9151_manager_start_gnss_locked(fd, 0);
+            (void)nrf9151_manager_start_gnss_locked(fd, !foreground);
+        }
+        if(nrf9151_gnss_monitor.configured) {
+            nrf9151_manager_gnss_lte_tick(fd, now_us);
         }
     }
     nrf9151_manager_debug_log("GNSS thread stop requested");
@@ -3629,12 +3882,19 @@ static void *nrf9151_manager_gnss_thread(void *arg)
                                        K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
         (void)nrf9151_manager_exchange(fd, "AT#XNMEA=0", NULL, 0,
                                        K230_NRF9151_CMD_TIMEOUT_US, NULL, NULL);
+        if(nrf9151_gnss_monitor.lte_paused) {
+            nrf9151_manager_gnss_resume_lte(fd, "GNSS stopped");
+        }
         nrf9151_manager_clear_gnss_session(&lock_fd, &fd);
     }
     pthread_mutex_lock(&nrf9151_manager_lock);
     nrf9151_gnss_monitor.active = 0;
     nrf9151_gnss_monitor.configured = 0;
     nrf9151_gnss_monitor.owners = 0;
+    /* Without a session LTE stays at CFUN=20/31 until the status monitor's
+     * next check, whose AT+CFUN=1 brings it back */
+    nrf9151_gnss_monitor.lte_paused = 0;
+    nrf9151_gnss_monitor.lte_poll_request = 0;
     pthread_mutex_unlock(&nrf9151_manager_lock);
     nrf9151_manager_mark_gnss_off("Off");
     nrf9151_manager_debug_log("GNSS thread exit");
