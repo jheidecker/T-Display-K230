@@ -902,7 +902,12 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
     fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
-    fprintf(fp, "udhcpc -q -n -t 8 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    /*
+     * No -q: udhcpc goes to the background once it has a lease and renews
+     * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
+     * could hand the address to another client while we kept using it.
+     */
+    fprintf(fp, "udhcpc -n -t 8 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
