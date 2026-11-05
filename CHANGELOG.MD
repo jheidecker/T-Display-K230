@@ -10,6 +10,12 @@
 - Fixed the Wi-Fi DHCP lease never being renewed. udhcpc exited right after
   getting the lease, so once it expired the router could give the address to
   another device. udhcpc now stays running and renews it.
+- Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
+  Autoconnect made one attempt at launcher start, and if it failed (no
+  `wlan0` yet, no association within 20 s, or no DHCP answer), nothing
+  retried. While Wi-Fi is on and the link is down, the launcher now retries
+  with backoff, cycling through saved networks. Attempts are kept in
+  `/tmp/k230_wifi_connect.log` instead of being overwritten.
 
 ## v0.2.9 - 2026-11-02
 
