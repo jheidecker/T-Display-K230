@@ -39,7 +39,9 @@
   `meshtasticd.autostart=0` in settings.conf to keep it stopped. Without
   `meshtasticd` the launcher's own Meshtastic app works as before. The
   startup LoRa probe is skipped while meshtasticd runs or starts at boot, so
-  it doesn't reset the radio under it.
+  it doesn't reset the radio under it. meshtasticd reads the system clock only
+  at startup, and at boot that's still 1970, so the launcher restarts it once
+  the clock is set, and again if the clock jumps by more than a minute.
 - Fixed battery capacity calibration not reaching the BQ27220 gauge, which
   kept reporting its 3000 mAh default. The launcher now writes the gauge in
   the sequence it accepts, reads the value back before reporting success, and
