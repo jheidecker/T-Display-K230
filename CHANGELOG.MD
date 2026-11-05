@@ -55,14 +55,25 @@
 - Fixed Wi-Fi dropping off the network after its DHCP lease ran out. udhcpc
   exited right after getting the lease, so nothing renewed it; it now stays
   running and renews.
+- Fixed Wi-Fi staying on a weak access point when a much stronger one with
+  the same SSID was in range. wpa_supplicant won't roam while the signal
+  is above about -64 dBm, which on the RTL8189FS still meant up to 30%
+  packet loss. While the signal is below -55 dBm, the launcher now scans
+  every 3 minutes and moves to an access point at least 8 dB stronger,
+  then waits 10 minutes before moving again. It moves by pinning
+  wpa_supplicant to that access point for up to 20 s, because mesh access
+  points can refuse the first attempt. Moves are logged to
+  `/tmp/k230_wifi_connect.log`.
 - Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
   the last address it held (kept in `wifi_last_ip` next to
   `settings.conf`) and sends the hostname.
 - Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
   Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
   yet, no association within 20 s, or no DHCP answer), nothing retried. It
-  now retries with backoff while Wi-Fi is on and the link is down, cycling
-  through saved networks. Attempts are kept in `/tmp/k230_wifi_connect.log`
+  now waits up to 45 s for the access point, keeps asking for a DHCP lease
+  in the background until one comes, and retries with backoff while Wi-Fi
+  is on and the link is down, cycling through saved networks. Attempts are
+  kept in `/tmp/k230_wifi_connect.log`
   instead of being overwritten, and wpa_supplicant logs to syslog
   (`/tmp/messages`).
 - Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,

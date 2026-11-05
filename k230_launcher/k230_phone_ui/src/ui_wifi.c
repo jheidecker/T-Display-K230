@@ -32,6 +32,13 @@
 #define WIFI_WATCHDOG_GRACE_US (60ULL * 1000000ULL)
 #define WIFI_WATCHDOG_BACKOFF_MIN_US (30ULL * 1000000ULL)
 #define WIFI_WATCHDOG_BACKOFF_MAX_US (300ULL * 1000000ULL)
+/* Roam check: see wifi_roam_check() */
+#define WIFI_ROAM_FIRST_CHECK_US (60ULL * 1000000ULL)
+#define WIFI_ROAM_CHECK_US (180ULL * 1000000ULL)
+#define WIFI_ROAM_HOLDOFF_US (600ULL * 1000000ULL)
+#define WIFI_ROAM_FAILED_SKIP_US (1800ULL * 1000000ULL)
+#define WIFI_ROAM_SCAN_BELOW_DBM (-55)
+#define WIFI_ROAM_MIN_GAIN_DB 8
 
 typedef struct {
     char ssid[NET_SSID_MAX];
@@ -72,6 +79,9 @@ static int wifi_selected_encrypted;
 static int wifi_autoconnect_started;
 static int wifi_watchdog_started;
 static int wifi_watchdog_next_profile;
+static uint64_t wifi_roam_last_us;
+static uint64_t wifi_roam_failed_us;
+static char wifi_roam_failed_bssid[18];
 static int wifi_suppress_click_index = -1;
 static uint64_t wifi_suppress_click_until_us;
 static char wifi_status_text[NET_STATUS_MAX] = "Wi-Fi on";
@@ -913,16 +923,20 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
     /* -s: which AP it joins, roams to or drops goes to /tmp/messages */
     fprintf(fp, "wpa_supplicant -B -s -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /*
+     * Wait up to 45 s. After a reboot the APs refused the first association
+     * attempts and wpa_supplicant backed off for 10 s, so it took 25 s; the
+     * old 20 s limit gave up 4 s before it associated.
+     */
     fprintf(fp, "i=0\n");
     fprintf(fp, "state=''\n");
-    fprintf(fp, "while [ $i -lt 20 ]; do\n");
+    fprintf(fp, "while [ $i -lt 45 ]; do\n");
     fprintf(fp, "  state=$(wpa_cli -i $IF status 2>>$LOG | sed -n 's/^wpa_state=//p')\n");
     fprintf(fp, "  echo \"[shell] wait_wpa[$i]=$state\" >>$LOG\n");
     fprintf(fp, "  [ \"$state\" = 'COMPLETED' ] && break\n");
     fprintf(fp, "  sleep 1\n");
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
-    fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
     /*
      * The RTL8189FS driver loads with its deepest power save (LPS). With it,
      * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
@@ -940,13 +954,25 @@ static int wifi_write_connect_script(void)
      * bare DISCOVER, and the router handed out a different address each
      * time (.142, .153, .147, .145 on one Deco). -x hostname names the
      * device in the router's client list.
+     *
+     * -b instead of -n: when no lease comes (not associated yet, or no DHCP
+     * answer), udhcpc keeps trying in the background every few seconds
+     * rather than exiting. Before, a late association left Wi-Fi up with no
+     * address until the watchdog restarted everything.
      */
     fprintf(fp, "LAST='%s'\n", WIFI_LAST_IP_PATH);
     fprintf(fp, "last=$(cat $LAST 2>/dev/null)\n");
     fprintf(fp, "case \"$last\" in ''|*[!0-9.]*) req='' ;; *) req=\"-r $last\" ;; esac\n");
-    fprintf(fp, "udhcpc -n -t 8 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "dhcp() { udhcpc -b -t $1 -A 5 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1; }\n");
+    fprintf(fp, "if [ \"$state\" != 'COMPLETED' ]; then\n");
+    fprintf(fp, "  echo '[shell] not associated yet, DHCP keeps trying in the background' >>$LOG\n");
+    fprintf(fp, "  dhcp 1\n");
+    fprintf(fp, "  exit 12\n");
+    fprintf(fp, "fi\n");
+    fprintf(fp, "dhcp 8\n");
     fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
-    fprintf(fp, "[ -n \"$ip\" ] && [ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
+    fprintf(fp, "[ -n \"$ip\" ] || exit 13\n");
+    fprintf(fp, "[ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
@@ -1503,6 +1529,136 @@ static int wifi_wpa_running(void)
            state[0] != '\0';
 }
 
+static int wifi_is_bssid(const char *text)
+{
+    if(!text || strlen(text) != 17U) {
+        return 0;
+    }
+    for(int i = 0; i < 17; i++) {
+        if((i % 3) == 2 ? text[i] != ':' : !isxdigit((unsigned char)text[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * Move to a clearly stronger AP of the same SSID. wpa_supplicant 2.11 won't
+ * do it: it skips within-ESS roaming while the current AP's SNR is above
+ * 25 dB ("Skip roam - Current BSS has good SNR"), which is anything above
+ * about -64 dBm. On this RTL8189FS a -60 dBm AP gave 3-30% packet loss next
+ * to a -46 dBm AP with none, and after a reboot it stayed there.
+ *
+ * Only while the link is weaker than -55 dBm: scan, and if another AP of the
+ * SSID is at least 8 dB stronger than the live signal, ask wpa_supplicant to
+ * move there. After a move, wait 10 minutes before the next; an AP that
+ * refused us for 20 s is skipped for 30 minutes. Runs on the watchdog
+ * thread.
+ */
+static void wifi_roam_check(uint64_t now_us)
+{
+    char cmd[768];
+    char line[160];
+    char cur[24] = "";
+    char best[24] = "";
+    char bssid[24];
+    char after[24] = "";
+    int rssi = 0;
+    int net_id = -1;
+    int have_rssi = 0;
+    int best_level = -200;
+    int level;
+    int rc;
+    FILE *fp;
+
+    if(wifi_roam_last_us && now_us - wifi_roam_last_us < WIFI_ROAM_HOLDOFF_US) {
+        return;
+    }
+    snprintf(cmd, sizeof(cmd),
+             "IF=%s; st=$(wpa_cli -i $IF status 2>/dev/null); "
+             "cur=$(echo \"$st\" | sed -n 's/^bssid=//p'); "
+             "ssid=$(echo \"$st\" | sed -n 's/^ssid=//p'); "
+             "id=$(echo \"$st\" | sed -n 's/^id=//p'); "
+             "rssi=$(wpa_cli -i $IF signal_poll 2>/dev/null | sed -n 's/^RSSI=//p'); "
+             "echo \"cur $cur $rssi $id\"; "
+             "[ -n \"$rssi\" ] && [ \"$rssi\" -lt %d ] || exit 0; "
+             "wpa_cli -i $IF scan >/dev/null 2>&1; sleep 6; "
+             "wpa_cli -i $IF scan_results 2>/dev/null | "
+             "awk -F'\\t' -v s=\"$ssid\" -v c=\"$cur\" "
+             "'NR > 1 && $5 == s && $1 != c { print \"cand\", $1, $3 }'",
+             NET_WIFI_IFACE, WIFI_ROAM_SCAN_BELOW_DBM);
+    fp = popen(cmd, "r");
+    if(!fp) {
+        return;
+    }
+    while(fgets(line, sizeof(line), fp)) {
+        if(strncmp(line, "cur ", 4) == 0) {
+            have_rssi = sscanf(line + 4, "%23s %d %d", cur, &rssi, &net_id) == 3;
+        } else if(sscanf(line, "cand %23s %d", bssid, &level) == 2 &&
+                  wifi_is_bssid(bssid) && level > best_level) {
+            if(strcmp(bssid, wifi_roam_failed_bssid) == 0 &&
+               now_us - wifi_roam_failed_us < WIFI_ROAM_FAILED_SKIP_US) {
+                continue;
+            }
+            snprintf(best, sizeof(best), "%s", bssid);
+            best_level = level;
+        }
+    }
+    pclose(fp);
+    if(!have_rssi || net_id < 0 || !best[0] ||
+       best_level < rssi + WIFI_ROAM_MIN_GAIN_DB) {
+        return;
+    }
+
+    wifi_log("Roaming from %s (%d dBm) to %s (%d dBm)", cur, rssi, best,
+             best_level);
+    wifi_roam_last_us = now_us;
+    /*
+     * Pin the network to the target, not `wpa_cli roam`. A Deco AP refused
+     * every association straight from another mesh AP (status 45), and
+     * after a refused roam wpa_supplicant rejoined some other AP at once,
+     * so a second try was refused again. Pinned, wpa_supplicant can only
+     * retry the target, and the target let it in a second later. The pin
+     * is removed after 20 s either way, so a target that keeps refusing
+     * can't keep us offline.
+     */
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s bssid %d %s >/dev/null 2>&1 && "
+             "wpa_cli -i %s reassociate >/dev/null 2>&1",
+             NET_WIFI_IFACE, net_id, best, NET_WIFI_IFACE);
+    rc = system(cmd);
+    (void)rc;
+    /* Prints the BSSID only once the connection is complete */
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s status 2>/dev/null | awk -F= "
+             "'$1 == \"bssid\" { b = $2 } $1 == \"wpa_state\" { s = $2 } "
+             "END { if (s == \"COMPLETED\") print b }'",
+             NET_WIFI_IFACE);
+    for(int i = 0; i < 20; i++) {
+        sleep(1);
+        after[0] = '\0';
+        (void)ui_read_cmd_first_line(cmd, after, sizeof(after));
+        if(strcmp(after, best) == 0) {
+            break;
+        }
+    }
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s bssid %d 00:00:00:00:00:00 >/dev/null 2>&1",
+             NET_WIFI_IFACE, net_id);
+    rc = system(cmd);
+    (void)rc;
+    if(strcmp(after, best) != 0) {
+        rc = system("wpa_cli -i " NET_WIFI_IFACE " reassociate >/dev/null 2>&1");
+        (void)rc;
+        snprintf(wifi_roam_failed_bssid, sizeof(wifi_roam_failed_bssid), "%s",
+                 best);
+        wifi_roam_failed_us = ui_monotonic_us();
+        wifi_log("Roam to %s refused for 20 s; skipping it for 30 min", best);
+    } else {
+        wifi_log("Roamed to %s", best);
+    }
+}
+
 /*
  * Autoconnect used to make one attempt at launcher start and never retry.
  * If that attempt failed (no wlan0 yet, no association within 20 s, or no
@@ -1516,6 +1672,8 @@ static void *wifi_watchdog_thread_cb(void *arg)
     uint64_t down_since_us = 0;
     uint64_t next_try_us = 0;
     uint64_t backoff_us = WIFI_WATCHDOG_BACKOFF_MIN_US;
+    uint64_t up_since_us = 0;
+    uint64_t next_roam_check_us = 0;
 
     (void)arg;
     for(;;) {
@@ -1539,8 +1697,21 @@ static void *wifi_watchdog_thread_cb(void *arg)
                         wifi_wpa_completed())) {
             down_since_us = 0;
             backoff_us = WIFI_WATCHDOG_BACKOFF_MIN_US;
+            if(!enabled) {
+                up_since_us = 0;
+                continue;
+            }
+            if(up_since_us == 0) {
+                up_since_us = now_us;
+                next_roam_check_us = now_us + WIFI_ROAM_FIRST_CHECK_US;
+            }
+            if(!busy && now_us >= next_roam_check_us) {
+                wifi_roam_check(now_us);
+                next_roam_check_us = ui_monotonic_us() + WIFI_ROAM_CHECK_US;
+            }
             continue;
         }
+        up_since_us = 0;
         if(busy) {
             continue;
         }
