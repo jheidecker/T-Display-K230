@@ -28,6 +28,15 @@
 - Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
   the last address it held (kept in `wifi_last_ip` next to
   `settings.conf`) and sends the hostname.
+- Fixed Wi-Fi staying on a weak access point when a much stronger one with
+  the same SSID was in range. wpa_supplicant won't roam while the signal
+  is above about -64 dBm, which on the RTL8189FS still meant up to 30%
+  packet loss. While the signal is below -55 dBm, the launcher now scans
+  every 3 minutes and moves to an access point at least 8 dB stronger,
+  then waits 10 minutes before moving again. It moves by pinning
+  wpa_supplicant to that access point for up to 20 s, because mesh access
+  points can refuse the first attempt. Moves are logged to
+  `/tmp/k230_wifi_connect.log`.
 
 ## v0.2.9 - 2026-11-02
 
