@@ -3,6 +3,7 @@
 #include "ui_i18n.h"
 #include "ui_input.h"
 #include "ui_prefs.h"
+#include "ui_time_sync.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -19,6 +20,8 @@
 #define TIME_NTP_DEFAULT "pool.ntp.org"
 #define TIME_TZ_DEFAULT "UTC0"
 #define TIME_NTP_LOG "/tmp/k230_time_sync.log"
+#define TIME_CLOCK_LOG "/tmp/k230_clock_sync.log"
+#define TIME_AUTO_NTP_RETRY_S 15
 
 typedef struct {
     const char *name;
@@ -207,14 +210,70 @@ static void time_write_ntp_files(const char *server)
                     server);
 }
 
+static int time_default_route_present(void)
+{
+    FILE *fp = fopen("/proc/net/route", "r");
+    char line[256];
+    int found = 0;
+
+    if(!fp) {
+        return 0;
+    }
+    while(!found && fgets(line, sizeof(line), fp)) {
+        char iface[32];
+        unsigned long dest;
+
+        /* The header line fails the %lx and is skipped */
+        found = sscanf(line, "%31s %lx", iface, &dest) == 2 && dest == 0UL;
+    }
+    fclose(fp);
+    return found;
+}
+
+/*
+ * S49ntp starts ntpd before Wi-Fi is up, and ntpd can take minutes to step
+ * the clock once it is. Try ntpdate as soon as there is a default route,
+ * until it works once; ntpd keeps the clock disciplined after that. Without
+ * Wi-Fi, LTE network time or a GNSS fix sets the clock instead.
+ */
+static void *time_auto_ntp_thread(void *arg)
+{
+    (void)arg;
+    for(;;) {
+        if(time_default_route_present()) {
+            char server[sizeof(time_ntp_server)];
+            char cmd[320];
+
+            pthread_mutex_lock(&time_lock);
+            snprintf(server, sizeof(server), "%s", time_ntp_server);
+            pthread_mutex_unlock(&time_lock);
+            snprintf(cmd, sizeof(cmd),
+                     "/usr/bin/ntpdate -u -b -p 1 -t 2 %s >>%s 2>&1",
+                     server, TIME_CLOCK_LOG);
+            if(ui_shell_exit_code(system(cmd)) == 0) {
+                k230_time_sync_note_set(K230_TIME_SOURCE_NTP);
+                break;
+            }
+        }
+        sleep(TIME_AUTO_NTP_RETRY_S);
+    }
+    return NULL;
+}
+
 void ui_time_settings_apply_startup(void)
 {
+    pthread_t thread;
+
     time_load_prefs();
 
     pthread_mutex_lock(&time_lock);
     time_apply_timezone(time_timezone);
     time_write_ntp_files(time_ntp_server);
     pthread_mutex_unlock(&time_lock);
+
+    if(pthread_create(&thread, NULL, time_auto_ntp_thread, NULL) == 0) {
+        pthread_detach(thread);
+    }
 }
 
 static void time_refresh_labels(void)
@@ -336,6 +395,9 @@ static void *time_sync_thread_cb(void *arg)
              "exit $rc) >%s 2>&1",
              server, TIME_NTP_LOG);
     rc = system(cmd);
+    if(ui_shell_exit_code(rc) == 0) {
+        k230_time_sync_note_set(K230_TIME_SOURCE_NTP);
+    }
 
     pthread_mutex_lock(&time_lock);
     time_sync_busy = 0;

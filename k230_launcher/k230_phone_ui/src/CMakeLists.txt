@@ -172,6 +172,7 @@ set(K230_PHONE_UI_SOURCES
     ui_settings.c
     ui_language.c
     ui_time_settings.c
+    ui_time_sync.c
     ui_terminal.c
     ui_wifi.c
     ui_wifi_iperf.c
@@ -223,6 +224,7 @@ add_executable(k230_halow_udp_stream halow_udp_stream.c)
 add_executable(k230_meshtastic_probe
     k230_meshtastic_probe.cpp
     ui_nrf9151_manager.c
+    ui_time_sync.c
     ${RADIOLIB_REQUIRED_SOURCES}
 )
 add_executable(k230_qr_scan

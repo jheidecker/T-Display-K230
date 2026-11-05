@@ -46,6 +46,12 @@
   kept reporting its 3000 mAh default. The launcher now writes the gauge in
   the sequence it accepts, reads the value back before reporting success, and
   re-applies the saved capacity at startup when the gauge has lost it.
+- Fixed the clock staying at 1970, or taking minutes to set, after boot. The
+  K230 has no RTC, and ntpd starts before Wi-Fi is up. The launcher now sets
+  the clock from the first source that knows the time: NTP as soon as Wi-Fi
+  has a route, LTE network time from the nRF9151 (`AT+CCLK?`), or a GNSS fix.
+  Later readings only correct it. Changes are logged to
+  `/tmp/k230_clock_sync.log`.
 
 ## v0.2.9 - 2026-11-02
 
