@@ -13,6 +13,14 @@
   keep LTE on.
 - Fixed the Cellular app's LTE status going stale while GNSS held the modem
   UART. The GNSS thread now refreshes it with NMEA output paused.
+- Added nRF Cloud A-GNSS for the nRF9151. When LTE is registered and the
+  modem is onboarded to nRF Cloud, GNSS connects to nRF Cloud and downloads
+  satellite data before pausing LTE, which gives a fix in seconds instead of
+  minutes and works with weaker signals. Without LTE or nRF Cloud, GNSS
+  starts as before. Set `nrf9151.gnss.agnss=0` in settings.conf to turn it
+  off. The modem needs Serial Modem firmware with the nRF Cloud provisioning
+  client. `nrf9151.gnss.cloud_assistance` alone doesn't give assistance: the
+  modem refuses it until nRF Cloud is connected.
 
 ## v0.2.9 - 2026-11-02
 
