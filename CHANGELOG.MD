@@ -17,6 +17,9 @@
   through saved networks. Attempts are kept in `/tmp/k230_wifi_connect.log`
   instead of being overwritten, and wpa_supplicant logs to syslog
   (`/tmp/messages`).
+- Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,
+  which could crash the launcher in LVGL (seen when a Wi-Fi retry
+  finished). They now leave the redraw to the main loop.
 - Fixed slow, lossy Wi-Fi. The RTL8189FS driver starts in its deepest power
   save, where pings to the device averaged 1.4 s against 0.18 s with power
   save off. Power save is now turned off after connecting; set
