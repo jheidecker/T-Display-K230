@@ -1,0 +1,36 @@
+From: Jay Heidecker <jay.heidecker@vcura.com>
+Subject: [PATCH] cfg80211: advertise HT40 only when rtw_bw_mode allows it
+
+rtw_cfg80211_init_ht_capab() always set IEEE80211_HT_CAP_SUP_WIDTH_20_40,
+even with rtw_bw_mode limiting the band to 20 MHz. The driver honors
+rtw_bw_mode for its own links, but wpa_supplicant reads the cfg80211
+capability to estimate throughput, so it kept ranking 40 MHz APs as twice
+as fast and chose them over stronger 20 MHz APs with the same SSID.
+
+Set SUP_WIDTH_20_40, SGI_40 and DSSSCCK40 only when rtw_bw_mode allows
+40 MHz on the band.
+
+--- a/os_dep/linux/ioctl_cfg80211.c
++++ b/os_dep/linux/ioctl_cfg80211.c
+@@ -9169,9 +9169,18 @@
+ 
+ 	ht_cap->ht_supported = 1;
+ 
+-	ht_cap->cap = IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
+-				IEEE80211_HT_CAP_SGI_40 | IEEE80211_HT_CAP_SGI_20 |
+-				IEEE80211_HT_CAP_DSSSCCK40 | IEEE80211_HT_CAP_MAX_AMSDU;
++	ht_cap->cap = IEEE80211_HT_CAP_SGI_20 | IEEE80211_HT_CAP_MAX_AMSDU;
++
++	/*
++	 * Advertise 40 MHz only when rtw_bw_mode allows it on this band. The
++	 * driver already limits its own links to 20 MHz when it doesn't, but
++	 * cfg80211 kept reporting HT40, so wpa_supplicant still ranked 40 MHz
++	 * APs as twice as fast and preferred them over stronger 20 MHz ones.
++	 */
++	if ((band == BAND_ON_2_4G && REGSTY_IS_BW_2G_SUPPORT(regsty, CHANNEL_WIDTH_40))
++		|| (band == BAND_ON_5G && REGSTY_IS_BW_5G_SUPPORT(regsty, CHANNEL_WIDTH_40)))
++		ht_cap->cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
++				IEEE80211_HT_CAP_SGI_40 | IEEE80211_HT_CAP_DSSSCCK40;
+ 	rtw_cfg80211_init_ht_capab_ex(padapter, ht_cap, band, rf_type);
+ 
+ 	/*

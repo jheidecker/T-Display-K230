@@ -2,6 +2,14 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed Wi-Fi choosing a weaker access point over a stronger one with the
+  same SSID. The RTL8189FS driver reported 40 MHz support to wpa_supplicant
+  even when limited to 20 MHz, so 40 MHz APs were ranked as twice as fast.
+  It now reports 40 MHz only when `rtw_bw_mode` allows it, and the driver
+  loads with `rtw_bw_mode=0` (20 MHz on 2.4 GHz), so the stronger AP wins.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,
