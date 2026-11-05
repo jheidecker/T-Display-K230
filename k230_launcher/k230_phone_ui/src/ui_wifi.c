@@ -27,8 +27,7 @@
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
 #define WIFI_MODULE_LOG "/tmp/k230_wifi_modprobe.log"
 #define WIFI_CONNECT_LOG_MAX_BYTES 65536L
-/* Scan every 30 s below -65 dBm, else every 300 s, and roam to a stronger AP */
-#define WIFI_BGSCAN "simple:30:-65:300"
+#define WIFI_LAST_IP_PATH UI_PREFS_DIR "/wifi_last_ip"
 #define WIFI_WATCHDOG_POLL_S 10U
 #define WIFI_WATCHDOG_GRACE_US (60ULL * 1000000ULL)
 #define WIFI_WATCHDOG_BACKOFF_MIN_US (30ULL * 1000000ULL)
@@ -870,10 +869,13 @@ static int wifi_write_config(const char *ssid, const char *password)
     fprintf(fp, "\n");
     fprintf(fp, "    scan_ssid=1\n");
     /*
-     * Without bgscan, wpa_supplicant keeps the AP it first joined until the
-     * link drops, even with a stronger AP of the same SSID next to it.
+     * No bgscan. With bgscan="simple:30:-65:300" on a Deco mesh,
+     * wpa_supplicant tried every 5 minutes to move from the -53 dBm 20 MHz
+     * AP the mesh steered it to onto a weaker 40 MHz AP, which it rates as
+     * faster. Those APs rejected it 36 times in 5.5 hours, and with this
+     * driver every attempt is a full disconnect. Mesh APs steer clients
+     * themselves; wpa_supplicant picks a new AP whenever the link drops.
      */
-    fprintf(fp, "    bgscan=\"%s\"\n", WIFI_BGSCAN);
     if(password && password[0]) {
         fprintf(fp, "    psk=");
         wifi_write_quoted(fp, password);
@@ -933,8 +935,18 @@ static int wifi_write_connect_script(void)
      * No -q: udhcpc goes to the background once it has a lease and renews
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
      * could hand the address to another client while we kept using it.
+     *
+     * -r asks for the last address we held. Without it every connect was a
+     * bare DISCOVER, and the router handed out a different address each
+     * time (.142, .153, .147, .145 on one Deco). -x hostname names the
+     * device in the router's client list.
      */
-    fprintf(fp, "udhcpc -n -t 8 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "LAST='%s'\n", WIFI_LAST_IP_PATH);
+    fprintf(fp, "last=$(cat $LAST 2>/dev/null)\n");
+    fprintf(fp, "case \"$last\" in ''|*[!0-9.]*) req='' ;; *) req=\"-r $last\" ;; esac\n");
+    fprintf(fp, "udhcpc -n -t 8 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
+    fprintf(fp, "[ -n \"$ip\" ] && [ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);

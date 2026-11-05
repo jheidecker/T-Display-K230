@@ -4,12 +4,12 @@
 
 ## Unreleased
 
-- Fixed Wi-Fi staying on a weak access point when a stronger one with the
-  same SSID was in range. wpa_supplicant now runs a background scan
-  (`bgscan="simple:30:-65:300"`) and roams to the stronger one.
 - Fixed Wi-Fi dropping off the network after its DHCP lease ran out. udhcpc
   exited right after getting the lease, so nothing renewed it; it now stays
   running and renews.
+- Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
+  the last address it held (kept in `wifi_last_ip` next to
+  `settings.conf`) and sends the hostname.
 - Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
   Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
   yet, no association within 20 s, or no DHCP answer), nothing retried. It
