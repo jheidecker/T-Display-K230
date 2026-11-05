@@ -40,6 +40,10 @@
   `meshtasticd` the launcher's own Meshtastic app works as before. The
   startup LoRa probe is skipped while meshtasticd runs or starts at boot, so
   it doesn't reset the radio under it.
+- Fixed battery capacity calibration not reaching the BQ27220 gauge, which
+  kept reporting its 3000 mAh default. The launcher now writes the gauge in
+  the sequence it accepts, reads the value back before reporting success, and
+  re-applies the saved capacity at startup when the gauge has lost it.
 
 ## v0.2.9 - 2026-11-02
 
