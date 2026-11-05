@@ -11,10 +11,16 @@
   exited right after getting the lease, so nothing renewed it; it now stays
   running and renews.
 - Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
-  Autoconnect made one attempt at launcher start, which could run before the
-  Wi-Fi chip had created `wlan0`. It now retries with backoff while Wi-Fi is
-  on and the link is down, cycling through saved networks. Attempts are kept
-  in `/tmp/k230_wifi_connect.log` instead of being overwritten.
+  Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
+  yet, no association within 20 s, or no DHCP answer), nothing retried. It
+  now retries with backoff while Wi-Fi is on and the link is down, cycling
+  through saved networks. Attempts are kept in `/tmp/k230_wifi_connect.log`
+  instead of being overwritten, and wpa_supplicant logs to syslog
+  (`/tmp/messages`).
+- Fixed slow, lossy Wi-Fi. The RTL8189FS driver starts in its deepest power
+  save, where pings to the device averaged 1.4 s against 0.18 s with power
+  save off. Power save is now turned off after connecting; set
+  `wifi.power_save=1` to keep it on.
 
 ## v0.2.9 - 2026-11-02
 

@@ -21,6 +21,7 @@
 #define WIFI_PROFILE_PATH "/root/app/k230_phone_ui/wifi_profiles.conf"
 #define WIFI_PROFILE_TMP_PATH "/root/app/k230_phone_ui/wifi_profiles.conf.tmp"
 #define WIFI_PREF_ENABLED "wifi.enabled"
+#define WIFI_PREF_POWER_SAVE "wifi.power_save"
 #define WIFI_MAX_PROFILES 12
 #define WIFI_SCAN_WAIT_STEP_US 100000U
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
@@ -889,10 +890,13 @@ static int wifi_write_config(const char *ssid, const char *password)
 static int wifi_write_connect_script(void)
 {
     FILE *fp = fopen("/tmp/k230_wifi_connect.sh", "w");
+    char power_save[8];
 
     if(!fp) {
         return -1;
     }
+
+    ui_prefs_get(WIFI_PREF_POWER_SAVE, power_save, sizeof(power_save), "0");
 
     fprintf(fp, "#!/bin/sh\n");
     fprintf(fp, "LOG='%s'\n", WIFI_CONNECT_LOG);
@@ -905,7 +909,8 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "if [ -f /var/run/udhcpc.$IF.pid ]; then kill $(cat /var/run/udhcpc.$IF.pid) >>$LOG 2>&1 || true; rm -f /var/run/udhcpc.$IF.pid; fi\n");
     fprintf(fp, "rm -f /var/run/wpa_supplicant/$IF\n");
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
-    fprintf(fp, "wpa_supplicant -B -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /* -s: which AP it joins, roams to or drops goes to /tmp/messages */
+    fprintf(fp, "wpa_supplicant -B -s -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
     fprintf(fp, "i=0\n");
     fprintf(fp, "state=''\n");
     fprintf(fp, "while [ $i -lt 20 ]; do\n");
@@ -916,6 +921,14 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
     fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
+    /*
+     * The RTL8189FS driver loads with its deepest power save (LPS). With it,
+     * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
+     * averaged 0.18 s. The driver also logs rtw_lps_state_chk warnings when
+     * leaving LPS. Keep it off unless wifi.power_save=1.
+     */
+    fprintf(fp, "iwconfig $IF power %s >>$LOG 2>&1 || true\n",
+            strcmp(power_save, "1") == 0 ? "on" : "off");
     /*
      * No -q: udhcpc goes to the background once it has a lease and renews
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
@@ -1480,8 +1493,8 @@ static int wifi_wpa_running(void)
 
 /*
  * Autoconnect used to make one attempt at launcher start and never retry.
- * At boot the AIC8800 creates wlan0 only after its firmware loads, so that
- * attempt could find no wlan0, and Wi-Fi stayed down until toggled by hand.
+ * If that attempt failed (no wlan0 yet, no association within 20 s, or no
+ * DHCP answer), Wi-Fi stayed down until toggled or connected by hand.
  * While Wi-Fi is enabled, a saved network exists and the link is down, retry
  * with backoff, cycling through the saved networks. A running wpa_supplicant
  * gets a grace period to reassociate on its own first.
