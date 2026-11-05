@@ -79,7 +79,7 @@ EOF
 
 
 	if  $(cat ${config} |  grep  BR2_PACKAGE_RTL8189FS=y >/dev/null 2>&1 ); then
-		echo " modprobe 8189fs " >> ${auto_boot_f}
+		echo " modprobe 8189fs rtw_bw_mode=0 " >> ${auto_boot_f} # 20 MHz on 2.4 GHz
 	fi
 
 	if  $(cat ${config} |  grep  BR2_PACKAGE_RTL8723DS=y >/dev/null 2>&1 ); then
