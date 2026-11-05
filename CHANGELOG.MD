@@ -16,6 +16,11 @@
   retried. While Wi-Fi is on and the link is down, the launcher now retries
   with backoff, cycling through saved networks. Attempts are kept in
   `/tmp/k230_wifi_connect.log` instead of being overwritten.
+- Fixed Wi-Fi associating but getting no address when the access point was
+  slow to accept it. The connect script gave up after 20 s, which an access
+  point that refuses the first attempt can exceed, and then asked for no
+  lease until the next retry. It now waits up to 45 s for the access point
+  and keeps asking for a lease in the background until one comes.
 
 ## v0.2.9 - 2026-11-02
 

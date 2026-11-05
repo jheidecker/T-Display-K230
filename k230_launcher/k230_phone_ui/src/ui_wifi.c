@@ -899,22 +899,39 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "rm -f /var/run/wpa_supplicant/$IF\n");
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
     fprintf(fp, "wpa_supplicant -B -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /*
+     * Wait up to 45 s. After a reboot the APs refused the first association
+     * attempts and wpa_supplicant backed off for 10 s, so it took 25 s; the
+     * old 20 s limit gave up 4 s before it associated.
+     */
     fprintf(fp, "i=0\n");
     fprintf(fp, "state=''\n");
-    fprintf(fp, "while [ $i -lt 20 ]; do\n");
+    fprintf(fp, "while [ $i -lt 45 ]; do\n");
     fprintf(fp, "  state=$(wpa_cli -i $IF status 2>>$LOG | sed -n 's/^wpa_state=//p')\n");
     fprintf(fp, "  echo \"[shell] wait_wpa[$i]=$state\" >>$LOG\n");
     fprintf(fp, "  [ \"$state\" = 'COMPLETED' ] && break\n");
     fprintf(fp, "  sleep 1\n");
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
-    fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
     /*
      * No -q: udhcpc goes to the background once it has a lease and renews
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
      * could hand the address to another client while we kept using it.
+     *
+     * -b instead of -n: when no lease comes (not associated yet, or no DHCP
+     * answer), udhcpc keeps trying in the background every few seconds
+     * rather than exiting. Before, a late association left Wi-Fi up with no
+     * address until the watchdog restarted everything.
      */
-    fprintf(fp, "udhcpc -n -t 8 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "dhcp() { udhcpc -b -t $1 -A 5 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1; }\n");
+    fprintf(fp, "if [ \"$state\" != 'COMPLETED' ]; then\n");
+    fprintf(fp, "  echo '[shell] not associated yet, DHCP keeps trying in the background' >>$LOG\n");
+    fprintf(fp, "  dhcp 1\n");
+    fprintf(fp, "  exit 12\n");
+    fprintf(fp, "fi\n");
+    fprintf(fp, "dhcp 8\n");
+    fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
+    fprintf(fp, "[ -n \"$ip\" ] || exit 13\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
