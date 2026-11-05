@@ -52,6 +52,26 @@
   has a route, LTE network time from the nRF9151 (`AT+CCLK?`), or a GNSS fix.
   Later readings only correct it. Changes are logged to
   `/tmp/k230_clock_sync.log`.
+- Fixed Wi-Fi dropping off the network after its DHCP lease ran out. udhcpc
+  exited right after getting the lease, so nothing renewed it; it now stays
+  running and renews.
+- Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
+  the last address it held (kept in `wifi_last_ip` next to
+  `settings.conf`) and sends the hostname.
+- Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
+  Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
+  yet, no association within 20 s, or no DHCP answer), nothing retried. It
+  now retries with backoff while Wi-Fi is on and the link is down, cycling
+  through saved networks. Attempts are kept in `/tmp/k230_wifi_connect.log`
+  instead of being overwritten, and wpa_supplicant logs to syslog
+  (`/tmp/messages`).
+- Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,
+  which could crash the launcher in LVGL (seen when a Wi-Fi retry
+  finished). They now leave the redraw to the main loop.
+- Fixed slow, lossy Wi-Fi. The RTL8189FS driver starts in its deepest power
+  save, where pings to the device averaged 1.4 s against 0.18 s with power
+  save off. Power save is now turned off after connecting; set
+  `wifi.power_save=1` to keep it on.
 
 ## v0.2.9 - 2026-11-02
 

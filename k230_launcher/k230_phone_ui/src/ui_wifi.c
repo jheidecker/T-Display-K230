@@ -21,10 +21,17 @@
 #define WIFI_PROFILE_PATH "/root/app/k230_phone_ui/wifi_profiles.conf"
 #define WIFI_PROFILE_TMP_PATH "/root/app/k230_phone_ui/wifi_profiles.conf.tmp"
 #define WIFI_PREF_ENABLED "wifi.enabled"
+#define WIFI_PREF_POWER_SAVE "wifi.power_save"
 #define WIFI_MAX_PROFILES 12
 #define WIFI_SCAN_WAIT_STEP_US 100000U
 #define WIFI_SCAN_WAIT_MAX_STEPS 100U
 #define WIFI_MODULE_LOG "/tmp/k230_wifi_modprobe.log"
+#define WIFI_CONNECT_LOG_MAX_BYTES 65536L
+#define WIFI_LAST_IP_PATH UI_PREFS_DIR "/wifi_last_ip"
+#define WIFI_WATCHDOG_POLL_S 10U
+#define WIFI_WATCHDOG_GRACE_US (60ULL * 1000000ULL)
+#define WIFI_WATCHDOG_BACKOFF_MIN_US (30ULL * 1000000ULL)
+#define WIFI_WATCHDOG_BACKOFF_MAX_US (300ULL * 1000000ULL)
 
 typedef struct {
     char ssid[NET_SSID_MAX];
@@ -63,6 +70,8 @@ static int wifi_connect_busy;
 static int wifi_power_worker_busy;
 static int wifi_selected_encrypted;
 static int wifi_autoconnect_started;
+static int wifi_watchdog_started;
+static int wifi_watchdog_next_profile;
 static int wifi_suppress_click_index = -1;
 static uint64_t wifi_suppress_click_until_us;
 static char wifi_status_text[NET_STATUS_MAX] = "Wi-Fi on";
@@ -859,6 +868,14 @@ static int wifi_write_config(const char *ssid, const char *password)
     wifi_write_quoted(fp, ssid);
     fprintf(fp, "\n");
     fprintf(fp, "    scan_ssid=1\n");
+    /*
+     * No bgscan. With bgscan="simple:30:-65:300" on a Deco mesh,
+     * wpa_supplicant tried every 5 minutes to move from the -53 dBm 20 MHz
+     * AP the mesh steered it to onto a weaker 40 MHz AP, which it rates as
+     * faster. Those APs rejected it 36 times in 5.5 hours, and with this
+     * driver every attempt is a full disconnect. Mesh APs steer clients
+     * themselves; wpa_supplicant picks a new AP whenever the link drops.
+     */
     if(password && password[0]) {
         fprintf(fp, "    psk=");
         wifi_write_quoted(fp, password);
@@ -875,10 +892,13 @@ static int wifi_write_config(const char *ssid, const char *password)
 static int wifi_write_connect_script(void)
 {
     FILE *fp = fopen("/tmp/k230_wifi_connect.sh", "w");
+    char power_save[8];
 
     if(!fp) {
         return -1;
     }
+
+    ui_prefs_get(WIFI_PREF_POWER_SAVE, power_save, sizeof(power_save), "0");
 
     fprintf(fp, "#!/bin/sh\n");
     fprintf(fp, "LOG='%s'\n", WIFI_CONNECT_LOG);
@@ -891,7 +911,8 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "if [ -f /var/run/udhcpc.$IF.pid ]; then kill $(cat /var/run/udhcpc.$IF.pid) >>$LOG 2>&1 || true; rm -f /var/run/udhcpc.$IF.pid; fi\n");
     fprintf(fp, "rm -f /var/run/wpa_supplicant/$IF\n");
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
-    fprintf(fp, "wpa_supplicant -B -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /* -s: which AP it joins, roams to or drops goes to /tmp/messages */
+    fprintf(fp, "wpa_supplicant -B -s -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
     fprintf(fp, "i=0\n");
     fprintf(fp, "state=''\n");
     fprintf(fp, "while [ $i -lt 20 ]; do\n");
@@ -902,7 +923,30 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
     fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
-    fprintf(fp, "udhcpc -q -n -t 8 -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    /*
+     * The RTL8189FS driver loads with its deepest power save (LPS). With it,
+     * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
+     * averaged 0.18 s. The driver also logs rtw_lps_state_chk warnings when
+     * leaving LPS. Keep it off unless wifi.power_save=1.
+     */
+    fprintf(fp, "iwconfig $IF power %s >>$LOG 2>&1 || true\n",
+            strcmp(power_save, "1") == 0 ? "on" : "off");
+    /*
+     * No -q: udhcpc goes to the background once it has a lease and renews
+     * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
+     * could hand the address to another client while we kept using it.
+     *
+     * -r asks for the last address we held. Without it every connect was a
+     * bare DISCOVER, and the router handed out a different address each
+     * time (.142, .153, .147, .145 on one Deco). -x hostname names the
+     * device in the router's client list.
+     */
+    fprintf(fp, "LAST='%s'\n", WIFI_LAST_IP_PATH);
+    fprintf(fp, "last=$(cat $LAST 2>/dev/null)\n");
+    fprintf(fp, "case \"$last\" in ''|*[!0-9.]*) req='' ;; *) req=\"-r $last\" ;; esac\n");
+    fprintf(fp, "udhcpc -n -t 8 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
+    fprintf(fp, "[ -n \"$ip\" ] && [ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
@@ -1313,7 +1357,15 @@ static void *wifi_connect_thread_cb(void *arg)
         return NULL;
     }
 
-    (void)unlink(WIFI_CONNECT_LOG);
+    {
+        struct stat st;
+
+        /* Keep earlier attempts for diagnosis, but bound the file in /tmp */
+        if(stat(WIFI_CONNECT_LOG, &st) == 0 &&
+           st.st_size > WIFI_CONNECT_LOG_MAX_BYTES) {
+            (void)unlink(WIFI_CONNECT_LOG);
+        }
+    }
     wifi_log("%s connect request ssid=%s encrypted=%d password_len=%u",
              req->auto_connect ? "Auto" : "Manual", req->ssid, req->encrypted,
              (unsigned)strlen(req->password));
@@ -1439,6 +1491,115 @@ static void wifi_password_submit_cb(const char *password, void *user_data)
     (void)wifi_start_connect_request(ssid, password, encrypted, 0);
 }
 
+static int wifi_wpa_running(void)
+{
+    char cmd[160];
+    char state[32];
+
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s status 2>/dev/null | sed -n 's/^wpa_state=//p'",
+             NET_WIFI_IFACE);
+    return ui_read_cmd_first_line(cmd, state, sizeof(state)) == 0 &&
+           state[0] != '\0';
+}
+
+/*
+ * Autoconnect used to make one attempt at launcher start and never retry.
+ * If that attempt failed (no wlan0 yet, no association within 20 s, or no
+ * DHCP answer), Wi-Fi stayed down until toggled or connected by hand.
+ * While Wi-Fi is enabled, a saved network exists and the link is down, retry
+ * with backoff, cycling through the saved networks. A running wpa_supplicant
+ * gets a grace period to reassociate on its own first.
+ */
+static void *wifi_watchdog_thread_cb(void *arg)
+{
+    uint64_t down_since_us = 0;
+    uint64_t next_try_us = 0;
+    uint64_t backoff_us = WIFI_WATCHDOG_BACKOFF_MIN_US;
+
+    (void)arg;
+    for(;;) {
+        char ip[64];
+        char ssid[NET_SSID_MAX];
+        char password[NET_PASS_MAX];
+        uint64_t now_us;
+        int encrypted = 0;
+        int enabled;
+        int busy;
+        int index = -1;
+
+        sleep(WIFI_WATCHDOG_POLL_S);
+        now_us = ui_monotonic_us();
+        pthread_mutex_lock(&wifi_lock);
+        wifi_profiles_load_locked();
+        enabled = wifi_enabled && wifi_profile_count > 0;
+        busy = wifi_connect_busy || wifi_scan_busy || wifi_power_worker_busy;
+        pthread_mutex_unlock(&wifi_lock);
+        if(!enabled || (ui_read_iface_ip(NET_WIFI_IFACE, ip, sizeof(ip)) == 0 &&
+                        wifi_wpa_completed())) {
+            down_since_us = 0;
+            backoff_us = WIFI_WATCHDOG_BACKOFF_MIN_US;
+            continue;
+        }
+        if(busy) {
+            continue;
+        }
+        if(down_since_us == 0) {
+            down_since_us = now_us;
+            next_try_us = now_us + (wifi_wpa_running() ?
+                                    WIFI_WATCHDOG_GRACE_US : 0ULL);
+        }
+        if(now_us < next_try_us) {
+            continue;
+        }
+
+        pthread_mutex_lock(&wifi_lock);
+        if(wifi_profile_count > 0) {
+            index = wifi_watchdog_next_profile % wifi_profile_count;
+            wifi_watchdog_next_profile++;
+            snprintf(ssid, sizeof(ssid), "%s", wifi_profiles[index].ssid);
+            snprintf(password, sizeof(password), "%s",
+                     wifi_profiles[index].password);
+            encrypted = wifi_profiles[index].encrypted;
+        }
+        pthread_mutex_unlock(&wifi_lock);
+        if(index < 0) {
+            continue;
+        }
+        wifi_log("Wi-Fi down %llus, retrying ssid=%s (saved network %d), "
+                 "next retry in %llus",
+                 (unsigned long long)((now_us - down_since_us) / 1000000ULL),
+                 ssid, index, (unsigned long long)(backoff_us / 1000000ULL));
+        (void)wifi_start_connect_request(ssid, password, encrypted, 1);
+        next_try_us = now_us + backoff_us;
+        backoff_us *= 2U;
+        if(backoff_us > WIFI_WATCHDOG_BACKOFF_MAX_US) {
+            backoff_us = WIFI_WATCHDOG_BACKOFF_MAX_US;
+        }
+    }
+    return NULL;
+}
+
+static void wifi_watchdog_start(void)
+{
+    pthread_t thread;
+
+    pthread_mutex_lock(&wifi_lock);
+    if(wifi_watchdog_started) {
+        pthread_mutex_unlock(&wifi_lock);
+        return;
+    }
+    wifi_watchdog_started = 1;
+    pthread_mutex_unlock(&wifi_lock);
+    if(pthread_create(&thread, NULL, wifi_watchdog_thread_cb, NULL) == 0) {
+        pthread_detach(thread);
+    } else {
+        pthread_mutex_lock(&wifi_lock);
+        wifi_watchdog_started = 0;
+        pthread_mutex_unlock(&wifi_lock);
+    }
+}
+
 void ui_wifi_autoconnect_start(void)
 {
     char ip[64];
@@ -1448,6 +1609,7 @@ void ui_wifi_autoconnect_start(void)
     int enabled;
     int should_start = 0;
 
+    wifi_watchdog_start();
     pthread_mutex_lock(&wifi_lock);
     wifi_load_prefs_locked();
     enabled = wifi_enabled;
