@@ -2,6 +2,12 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,
+  which could crash the launcher in LVGL, for example when Wi-Fi was turned
+  off. The main loop now does the redraw.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,

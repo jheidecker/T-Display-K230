@@ -292,6 +292,7 @@ typedef struct {
 
 static volatile int running = 1;
 static volatile int fast_refresh_pending;
+static volatile int status_bar_update_pending;
 static pthread_t ui_main_thread;
 static int ui_main_thread_valid;
 static lv_indev_t *evdev_indev;
@@ -6159,7 +6160,17 @@ void app_set_wifi_status(const char *state)
     const char *value = state && state[0] ? state : "on";
 
     snprintf(status_wifi_state, sizeof(status_wifi_state), "%s", value);
-    status_bar_update(NULL);
+    /*
+     * Wi-Fi worker threads call this too, such as the one that turns Wi-Fi
+     * off. status_bar_update() changes LVGL objects, which only the UI
+     * thread may touch; off that thread the main loop redraws the bar
+     * instead.
+     */
+    if(ui_main_thread_valid && pthread_equal(pthread_self(), ui_main_thread)) {
+        status_bar_update(NULL);
+        return;
+    }
+    status_bar_update_pending = 1;
 }
 
 void app_set_ble_status(const char *state)
@@ -14545,6 +14556,10 @@ int main(void)
         if(fast_refresh_pending) {
             fast_refresh_pending = 0;
             request_fast_refresh();
+        }
+        if(status_bar_update_pending) {
+            status_bar_update_pending = 0;
+            status_bar_update(NULL);
         }
         wait_ms = lv_timer_handler();
         {
