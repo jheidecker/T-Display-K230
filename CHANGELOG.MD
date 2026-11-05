@@ -13,8 +13,10 @@
 - Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
   Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
   yet, no association within 20 s, or no DHCP answer), nothing retried. It
-  now retries with backoff while Wi-Fi is on and the link is down, cycling
-  through saved networks. Attempts are kept in `/tmp/k230_wifi_connect.log`
+  now waits up to 45 s for the access point, keeps asking for a DHCP lease
+  in the background until one comes, and retries with backoff while Wi-Fi
+  is on and the link is down, cycling through saved networks. Attempts are
+  kept in `/tmp/k230_wifi_connect.log`
   instead of being overwritten, and wpa_supplicant logs to syslog
   (`/tmp/messages`).
 - Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,

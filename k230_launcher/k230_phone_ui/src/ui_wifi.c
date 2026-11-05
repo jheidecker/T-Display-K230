@@ -913,16 +913,20 @@ static int wifi_write_connect_script(void)
     fprintf(fp, "ifconfig $IF up >>$LOG 2>&1 || exit 10\n");
     /* -s: which AP it joins, roams to or drops goes to /tmp/messages */
     fprintf(fp, "wpa_supplicant -B -s -i $IF -D nl80211,wext -c $CONF >>$LOG 2>&1 || exit 11\n");
+    /*
+     * Wait up to 45 s. After a reboot the APs refused the first association
+     * attempts and wpa_supplicant backed off for 10 s, so it took 25 s; the
+     * old 20 s limit gave up 4 s before it associated.
+     */
     fprintf(fp, "i=0\n");
     fprintf(fp, "state=''\n");
-    fprintf(fp, "while [ $i -lt 20 ]; do\n");
+    fprintf(fp, "while [ $i -lt 45 ]; do\n");
     fprintf(fp, "  state=$(wpa_cli -i $IF status 2>>$LOG | sed -n 's/^wpa_state=//p')\n");
     fprintf(fp, "  echo \"[shell] wait_wpa[$i]=$state\" >>$LOG\n");
     fprintf(fp, "  [ \"$state\" = 'COMPLETED' ] && break\n");
     fprintf(fp, "  sleep 1\n");
     fprintf(fp, "  i=$((i + 1))\n");
     fprintf(fp, "done\n");
-    fprintf(fp, "[ \"$state\" = 'COMPLETED' ] || exit 12\n");
     /*
      * The RTL8189FS driver loads with its deepest power save (LPS). With it,
      * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
@@ -940,13 +944,25 @@ static int wifi_write_connect_script(void)
      * bare DISCOVER, and the router handed out a different address each
      * time (.142, .153, .147, .145 on one Deco). -x hostname names the
      * device in the router's client list.
+     *
+     * -b instead of -n: when no lease comes (not associated yet, or no DHCP
+     * answer), udhcpc keeps trying in the background every few seconds
+     * rather than exiting. Before, a late association left Wi-Fi up with no
+     * address until the watchdog restarted everything.
      */
     fprintf(fp, "LAST='%s'\n", WIFI_LAST_IP_PATH);
     fprintf(fp, "last=$(cat $LAST 2>/dev/null)\n");
     fprintf(fp, "case \"$last\" in ''|*[!0-9.]*) req='' ;; *) req=\"-r $last\" ;; esac\n");
-    fprintf(fp, "udhcpc -n -t 8 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1 || exit 13\n");
+    fprintf(fp, "dhcp() { udhcpc -b -t $1 -A 5 $req -x hostname:$(hostname) -p /var/run/udhcpc.$IF.pid -i $IF >>$LOG 2>&1; }\n");
+    fprintf(fp, "if [ \"$state\" != 'COMPLETED' ]; then\n");
+    fprintf(fp, "  echo '[shell] not associated yet, DHCP keeps trying in the background' >>$LOG\n");
+    fprintf(fp, "  dhcp 1\n");
+    fprintf(fp, "  exit 12\n");
+    fprintf(fp, "fi\n");
+    fprintf(fp, "dhcp 8\n");
     fprintf(fp, "ip=$(ifconfig $IF | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p')\n");
-    fprintf(fp, "[ -n \"$ip\" ] && [ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
+    fprintf(fp, "[ -n \"$ip\" ] || exit 13\n");
+    fprintf(fp, "[ \"$ip\" != \"$last\" ] && mkdir -p \"$(dirname $LAST)\" && echo \"$ip\" >$LAST\n");
     fprintf(fp, "ifconfig $IF >>$LOG 2>&1 || true\n");
     fprintf(fp, "exit 0\n");
     fclose(fp);
