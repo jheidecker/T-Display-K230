@@ -2,6 +2,20 @@
 
 [English](./CHANGELOG.MD) | [中文](./CHANGELOG_CN.MD)
 
+## Unreleased
+
+- Fixed Wi-Fi staying on a weak access point when a stronger one with the
+  same SSID was in range. wpa_supplicant now runs a background scan
+  (`bgscan="simple:30:-65:300"`) and roams to the stronger one.
+- Fixed Wi-Fi dropping off the network after its DHCP lease ran out. udhcpc
+  exited right after getting the lease, so nothing renewed it; it now stays
+  running and renews.
+- Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
+  Autoconnect made one attempt at launcher start, which could run before the
+  Wi-Fi chip had created `wlan0`. It now retries with backoff while Wi-Fi is
+  on and the link is down, cycling through saved networks. Attempts are kept
+  in `/tmp/k230_wifi_connect.log` instead of being overwritten.
+
 ## v0.2.9 - 2026-11-02
 
 - Improved nRF9151 LTE/GNSS coexistence by prioritizing LTE registration,
