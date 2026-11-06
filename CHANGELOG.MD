@@ -52,9 +52,30 @@
   has a route, LTE network time from the nRF9151 (`AT+CCLK?`), or a GNSS fix.
   Later readings only correct it. Changes are logged to
   `/tmp/k230_clock_sync.log`.
-- Fixed Wi-Fi dropping off the network after its DHCP lease ran out. udhcpc
-  exited right after getting the lease, so nothing renewed it; it now stays
-  running and renews.
+- Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,
+  which could crash the launcher in LVGL, for example when Wi-Fi was turned
+  off. The main loop now does the redraw.
+- Fixed the Wi-Fi DHCP lease never being renewed. udhcpc exited right after
+  getting the lease, so once it expired the router could give the address to
+  another device. udhcpc now stays running and renews it.
+- Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
+  Autoconnect made one attempt at launcher start, and if it failed (no
+  `wlan0` yet, no association within 20 s, or no DHCP answer), nothing
+  retried. While Wi-Fi is on and the link is down, the launcher now retries
+  with backoff, cycling through saved networks. Attempts are kept in
+  `/tmp/k230_wifi_connect.log` instead of being overwritten.
+- Fixed Wi-Fi associating but getting no address when the access point was
+  slow to accept it. The connect script gave up after 20 s, which an access
+  point that refuses the first attempt can exceed, and then asked for no
+  lease until the next retry. It now waits up to 45 s for the access point
+  and keeps asking for a lease in the background until one comes.
+- Turned Wi-Fi power save off after connecting. The RTL8189FS driver
+  starts in its deepest power save, where pings to the device averaged
+  1.4 s against 0.18 s with it off. Set `wifi.power_save=1` to keep it on.
+  wpa_supplicant now also logs to syslog (`/tmp/messages`).
+- Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
+  the last address it held (kept in `wifi_last_ip` next to
+  `settings.conf`) and sends the hostname.
 - Fixed Wi-Fi staying on a weak access point when a much stronger one with
   the same SSID was in range. wpa_supplicant won't roam while the signal
   is above about -64 dBm, which on the RTL8189FS still meant up to 30%
@@ -64,25 +85,6 @@
   wpa_supplicant to that access point for up to 20 s, because mesh access
   points can refuse the first attempt. Moves are logged to
   `/tmp/k230_wifi_connect.log`.
-- Fixed the Wi-Fi address changing on every reconnect. udhcpc now asks for
-  the last address it held (kept in `wifi_last_ip` next to
-  `settings.conf`) and sends the hostname.
-- Fixed Wi-Fi sometimes not connecting at boot until it was toggled by hand.
-  Autoconnect made one attempt at launcher start; if it failed (no `wlan0`
-  yet, no association within 20 s, or no DHCP answer), nothing retried. It
-  now waits up to 45 s for the access point, keeps asking for a DHCP lease
-  in the background until one comes, and retries with backoff while Wi-Fi
-  is on and the link is down, cycling through saved networks. Attempts are
-  kept in `/tmp/k230_wifi_connect.log`
-  instead of being overwritten, and wpa_supplicant logs to syslog
-  (`/tmp/messages`).
-- Fixed Wi-Fi worker threads redrawing the status bar off the UI thread,
-  which could crash the launcher in LVGL (seen when a Wi-Fi retry
-  finished). They now leave the redraw to the main loop.
-- Fixed slow, lossy Wi-Fi. The RTL8189FS driver starts in its deepest power
-  save, where pings to the device averaged 1.4 s against 0.18 s with power
-  save off. Power save is now turned off after connecting; set
-  `wifi.power_save=1` to keep it on.
 - Fixed Wi-Fi choosing a weaker access point over a stronger one with the
   same SSID. The RTL8189FS driver reported 40 MHz support to wpa_supplicant
   even when limited to 20 MHz, so 40 MHz APs were ranked as twice as fast.

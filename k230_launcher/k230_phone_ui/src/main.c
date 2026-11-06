@@ -6161,9 +6161,10 @@ void app_set_wifi_status(const char *state)
 
     snprintf(status_wifi_state, sizeof(status_wifi_state), "%s", value);
     /*
-     * Wi-Fi worker threads (power off, the autoconnect retry) call this too.
-     * status_bar_update() changes LVGL objects, which only the UI thread may
-     * touch; off that thread the main loop redraws the bar instead.
+     * Wi-Fi worker threads call this too, such as the one that turns Wi-Fi
+     * off. status_bar_update() changes LVGL objects, which only the UI
+     * thread may touch; off that thread the main loop redraws the bar
+     * instead.
      */
     if(ui_main_thread_valid && pthread_equal(pthread_self(), ui_main_thread)) {
         status_bar_update(NULL);
