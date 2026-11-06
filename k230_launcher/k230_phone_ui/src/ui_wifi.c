@@ -1,7 +1,9 @@
 #include "ui_wifi.h"
 
+#include "ui_hardware.h"
 #include "ui_i18n.h"
 #include "ui_input.h"
+#include "ui_power_manager.h"
 #include "ui_prefs.h"
 
 #include <ctype.h>
@@ -39,6 +41,7 @@
 #define WIFI_ROAM_FAILED_SKIP_US (1800ULL * 1000000ULL)
 #define WIFI_ROAM_SCAN_BELOW_DBM (-55)
 #define WIFI_ROAM_MIN_GAIN_DB 8
+#define WIFI_PS_INPUT_CHECK_US (10ULL * 1000000ULL)
 
 typedef struct {
     char ssid[NET_SSID_MAX];
@@ -902,13 +905,10 @@ static int wifi_write_config(const char *ssid, const char *password)
 static int wifi_write_connect_script(void)
 {
     FILE *fp = fopen("/tmp/k230_wifi_connect.sh", "w");
-    char power_save[8];
 
     if(!fp) {
         return -1;
     }
-
-    ui_prefs_get(WIFI_PREF_POWER_SAVE, power_save, sizeof(power_save), "0");
 
     fprintf(fp, "#!/bin/sh\n");
     fprintf(fp, "LOG='%s'\n", WIFI_CONNECT_LOG);
@@ -941,10 +941,10 @@ static int wifi_write_connect_script(void)
      * The RTL8189FS driver loads with its deepest power save (LPS). With it,
      * pings to the device averaged 1.4 s, peaking at 3.3 s; with it off they
      * averaged 0.18 s. The driver also logs rtw_lps_state_chk warnings when
-     * leaving LPS. Keep it off unless wifi.power_save=1.
+     * leaving LPS. Turn it off for DHCP; once the connect is done,
+     * wifi_power_save_poll() sets it from wifi.power_save.
      */
-    fprintf(fp, "iwconfig $IF power %s >>$LOG 2>&1 || true\n",
-            strcmp(power_save, "1") == 0 ? "on" : "off");
+    fprintf(fp, "iwconfig $IF power off >>$LOG 2>&1 || true\n");
     /*
      * No -q: udhcpc goes to the background once it has a lease and renews
      * it. With -q it exited, the lease (2 h on a Deco) lapsed, and the router
@@ -1660,6 +1660,98 @@ static void wifi_roam_check(uint64_t now_us)
 }
 
 /*
+ * wifi.power_save: "auto" (default) turns power save on only while the board
+ * runs on battery with the screen off; "1" keeps it on, "0" keeps it off.
+ * With it on, pings to the device averaged 1.4 s against 0.18 s with it off.
+ * With it off, the board drew about 124 mA more from the battery with the
+ * screen off (594 against 470 mA). So it's off while someone may be using
+ * the device or USB powers it, and on while the device sits idle on battery.
+ *
+ * Runs every second on the watchdog thread, so it's off within a second of
+ * the screen coming on. The charger is read only while the screen is off,
+ * every 10 s; if it can't be read, the board counts as on battery.
+ */
+static void wifi_power_save_poll(int read_pref)
+{
+    static char mode[8] = "auto";
+    static int applied = -1;
+    static int on_battery = 1;
+    static uint64_t next_input_check_us;
+    static uint64_t retry_us;
+    static const char *logged_why;
+    static int charger_status = -1;
+    uint64_t now_us = ui_monotonic_us();
+    const char *why;
+    char cmd[96];
+    int busy;
+    int want;
+    int present;
+
+    pthread_mutex_lock(&wifi_lock);
+    busy = !wifi_enabled || wifi_connect_busy || wifi_power_worker_busy;
+    pthread_mutex_unlock(&wifi_lock);
+    if(busy) {
+        /* The connect script turns power save off; apply it again after. */
+        applied = -1;
+        retry_us = 0;
+        logged_why = NULL;
+        return;
+    }
+    if(read_pref || applied < 0) {
+        ui_prefs_get(WIFI_PREF_POWER_SAVE, mode, sizeof(mode), "auto");
+    }
+    if(strcmp(mode, "1") == 0) {
+        want = 1;
+        why = "wifi.power_save=1";
+    } else if(strcmp(mode, "0") == 0) {
+        want = 0;
+        why = "wifi.power_save=0";
+    } else if(!ui_power_manager_screen_off()) {
+        next_input_check_us = 0;
+        want = 0;
+        why = "screen on";
+    } else {
+        if(now_us >= next_input_check_us) {
+            present = 0;
+            on_battery = !(ui_bq25896_get_input_present(&present,
+                                                        &charger_status) == 0 &&
+                           present);
+            next_input_check_us = now_us + WIFI_PS_INPUT_CHECK_US;
+        }
+        want = on_battery;
+        why = on_battery ? "screen off, on battery" : "screen off, on USB power";
+    }
+    if(want == applied && why == logged_why) {
+        return;
+    }
+    if(want != applied) {
+        if(now_us < retry_us) {
+            return;
+        }
+        snprintf(cmd, sizeof(cmd), "iwconfig %s power %s >/dev/null 2>&1",
+                 NET_WIFI_IFACE, want ? "on" : "off");
+        if(system(cmd) != 0) {
+            /* No wlan0 yet: don't fork iwconfig every second */
+            retry_us = now_us + WIFI_PS_INPUT_CHECK_US;
+            return;
+        }
+        applied = want;
+    }
+    /* Logged on every change of reason, so USB power with the screen off
+     * shows up too, with the charger status it was decided from. */
+    logged_why = why;
+    if(strncmp(why, "screen off", 10) == 0 && charger_status >= 0) {
+        wifi_log("Wi-Fi power save %s (%s, BQ25896 REG0B=0x%02X)",
+                 want ? "on" : "off", why, charger_status);
+    } else if(strncmp(why, "screen off", 10) == 0) {
+        wifi_log("Wi-Fi power save %s (%s, charger not read)",
+                 want ? "on" : "off", why);
+    } else {
+        wifi_log("Wi-Fi power save %s (%s)", want ? "on" : "off", why);
+    }
+}
+
+/*
  * Autoconnect used to make one attempt at launcher start and never retry.
  * If that attempt failed (no wlan0 yet, no association within 20 s, or no
  * DHCP answer), Wi-Fi stayed down until toggled or connected by hand.
@@ -1686,7 +1778,10 @@ static void *wifi_watchdog_thread_cb(void *arg)
         int busy;
         int index = -1;
 
-        sleep(WIFI_WATCHDOG_POLL_S);
+        for(unsigned i = 0; i < WIFI_WATCHDOG_POLL_S; i++) {
+            sleep(1);
+            wifi_power_save_poll(i == 0);
+        }
         now_us = ui_monotonic_us();
         pthread_mutex_lock(&wifi_lock);
         wifi_profiles_load_locked();

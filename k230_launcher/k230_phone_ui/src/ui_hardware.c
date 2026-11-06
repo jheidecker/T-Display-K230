@@ -4000,6 +4000,34 @@ int ui_bq25896_get_usb_present(int *present, int *vbus_mv)
     return ui_bq25896_get_power_state(present, vbus_mv, NULL);
 }
 
+/*
+ * Whether USB or another input powers the board, from REG0B alone. Cheap
+ * enough to poll: ui_bq25896_get_power_state() reads every register and
+ * waits 90 ms for an ADC conversion.
+ */
+int ui_bq25896_get_input_present(int *present, int *status_reg)
+{
+    uint8_t status = 0;
+    int vbus_state;
+
+    if(!present) {
+        return -1;
+    }
+    *present = 0;
+    if(status_reg) {
+        *status_reg = -1;
+    }
+    if(keyboard_i2c_read_reg(BQ25896_ADDR, BQ25896_REG_STATUS, &status) != 0) {
+        return -1;
+    }
+    if(status_reg) {
+        *status_reg = status;
+    }
+    vbus_state = (status >> 5) & 0x07;
+    *present = (vbus_state != 0 && vbus_state != 7) || (status & 0x04) != 0;
+    return 0;
+}
+
 int ui_bq25896_get_power_state(int *usb_present, int *vbus_mv, int *vbat_mv)
 {
     bq25896_reading_t reading;
